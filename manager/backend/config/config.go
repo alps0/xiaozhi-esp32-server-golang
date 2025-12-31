@@ -11,6 +11,7 @@ type Config struct {
 	Server   ServerConfig   `json:"server"`
 	Database DatabaseConfig `json:"database"`
 	JWT      JWTConfig      `json:"jwt"`
+	History  HistoryConfig  `json:"history"`
 }
 
 type ServerConfig struct {
@@ -29,6 +30,12 @@ type DatabaseConfig struct {
 type JWTConfig struct {
 	Secret     string `json:"secret"`
 	ExpireHour int    `json:"expire_hour"`
+}
+
+type HistoryConfig struct {
+	Enabled       bool   `json:"enabled"`
+	AudioBasePath string `json:"audio_base_path"` // 音频存储基础路径
+	MaxFileSize   int64  `json:"max_file_size"`   // 最大文件大小(字节)，默认10MB
 }
 
 func Load() *Config {
