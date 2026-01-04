@@ -62,6 +62,11 @@ func LoadWithPath(configPath string) *Config {
 		config.Database.Database = database
 	}
 
+	// 优先使用环境变量覆盖音频存储路径
+	if audioBasePath := os.Getenv("AUDIO_BASE_PATH"); audioBasePath != "" {
+		config.History.AudioBasePath = audioBasePath
+	}
+
 	fmt.Println("config", config)
 
 	return config
