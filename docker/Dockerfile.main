@@ -1,5 +1,6 @@
-# 构建阶段
-FROM golang:1.24.4 AS builder
+# 构建阶段（仅支持 amd64/x64 架构）
+# syntax=docker/dockerfile:1
+FROM --platform=linux/amd64 golang:1.24.4 AS builder
 
 # 设置非交互式安装环境变量
 ENV DEBIAN_FRONTEND=noninteractive
@@ -71,8 +72,8 @@ ENV CGO_CFLAGS="-I${ONNXRUNTIME_DIR}/include/onnxruntime -I/app/lib/ten-vad/incl
 # 构建主程序
 RUN go build -o /app/xiaozhi_server ./cmd/server/
 
-# 运行阶段
-FROM ubuntu:22.04
+# 运行阶段（仅支持 amd64/x64 架构）
+FROM --platform=linux/amd64 ubuntu:22.04
 
 # 设置非交互式安装环境变量
 ENV DEBIAN_FRONTEND=noninteractive
