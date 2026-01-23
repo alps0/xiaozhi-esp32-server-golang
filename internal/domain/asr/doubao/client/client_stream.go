@@ -175,7 +175,6 @@ func (c *AsrWsClient) SendMessages(ctx context.Context, audioStream <-chan []flo
 }
 
 func (c *AsrWsClient) recvMessages(ctx context.Context, resChan chan<- *response.AsrResponse, stopChan chan<- struct{}) {
-	defer close(resChan)
 	for {
 		c.mu.RLock()
 		conn := c.connect
@@ -191,7 +190,11 @@ func (c *AsrWsClient) recvMessages(ctx context.Context, resChan chan<- *response
 			return
 		}
 		resp := response.ParseResponse(message)
-		resChan <- resp
+		select {
+		case <-ctx.Done():
+			return
+		case resChan <- resp:
+		}
 		if resp.IsLastPackage {
 			return
 		}
@@ -205,6 +208,8 @@ func (c *AsrWsClient) recvMessages(ctx context.Context, resChan chan<- *response
 func (c *AsrWsClient) StartAudioStream(ctx context.Context, audioStream <-chan []float32, resChan chan<- *response.AsrResponse) error {
 	stopChan := make(chan struct{})
 	sendDoneChan := make(chan error, 1) // 发送完成通知（nil表示正常完成，error表示出错）
+
+	defer close(resChan)
 
 	// 启动发送 goroutine
 	go func() {
@@ -243,7 +248,6 @@ func (c *AsrWsClient) StartAudioStream(ctx context.Context, audioStream <-chan [
 				IsLastPackage: true,
 				PayloadMsg:    payload,
 			}
-			close(resChan)
 			return nil
 		}
 		// 连接已建立，启动接收 goroutine（处理剩余的响应）
