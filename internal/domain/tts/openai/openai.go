@@ -260,9 +260,9 @@ func (p *OpenAITTSProvider) TextToSpeechStream(ctx context.Context, text string,
 		}
 
 		// 根据音频格式处理流式响应
-		if p.ResponseFormat == "mp3" {
+		if p.ResponseFormat == "mp3" || p.ResponseFormat == "wav" || p.ResponseFormat == "pcm" {
 			// 创建音频解码器
-			decoder, err := util.CreateAudioDecoder(ctx, resp.Body, outputChan, frameDuration, p.ResponseFormat)
+			decoder, err := util.CreateAudioDecoderWithSampleRate(ctx, resp.Body, outputChan, frameDuration, p.ResponseFormat, sampleRate)
 			if err != nil {
 				log.Errorf("创建OpenAI音频解码器失败: %v", err)
 				close(outputChan)

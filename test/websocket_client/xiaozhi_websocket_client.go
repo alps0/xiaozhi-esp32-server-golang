@@ -538,7 +538,7 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 	      "receive_timeout": 60
 	    }
 	*/
-	edgeConfig := map[string]interface{}{
+	/*edgeConfig := map[string]interface{}{
 		"voice":           "zh-CN-XiaoxiaoNeural",
 		"rate":            "+0%",
 		"volume":          "+0%",
@@ -551,11 +551,11 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 	ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
 	if err != nil {
 		return fmt.Errorf("获取tts服务失败: %v", err)
-	}
-	/*ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	}*/
+	ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
 	if err != nil {
 		return fmt.Errorf("获取tts服务失败: %v", err)
-	}*/
+	}
 
 	/*
 		audioData, err := ttsProvider.TextToSpeech(context.Background(), "你叫什么名字?")
