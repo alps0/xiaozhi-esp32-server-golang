@@ -74,6 +74,7 @@
             <el-option label="Edge TTS" value="edge" />
             <el-option label="Edge 离线" value="edge_offline" />
             <el-option label="OpenAI" value="openai" />
+            <el-option label="千问" value="aliyun_qwen" />
             <el-option label="智谱" value="zhipu" />
             <el-option label="Minimax" value="minimax" />
           </el-select>
@@ -245,6 +246,38 @@
           </el-form-item>
           <el-form-item label="帧时长" prop="edge_offline.frame_duration">
             <el-input-number v-model="form.edge_offline.frame_duration" :min="1" :max="100" style="width: 100%" />
+          </el-form-item>
+        </template>
+
+        <!-- 千问 TTS 配置 -->
+        <template v-if="form.provider === 'aliyun_qwen'">
+          <el-form-item label="API Key" prop="qwen_tts.api_key">
+            <el-input v-model="form.qwen_tts.api_key" placeholder="请输入API Key" type="password" show-password />
+          </el-form-item>
+          <el-form-item label="地域" prop="qwen_tts.region">
+            <el-select v-model="form.qwen_tts.region" placeholder="请选择地域" style="width: 100%">
+              <el-option label="北京" value="beijing" />
+              <el-option label="新加坡" value="singapore" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="模型" prop="qwen_tts.model">
+            <el-input v-model="form.qwen_tts.model" placeholder="qwen3-tts-flash" />
+          </el-form-item>
+          <el-form-item label="音色" prop="qwen_tts.voice">
+            <el-input v-model="form.qwen_tts.voice" placeholder="Cherry" />
+          </el-form-item>
+          <el-form-item label="语种" prop="qwen_tts.language_type">
+            <el-select v-model="form.qwen_tts.language_type" placeholder="请选择语种" style="width: 100%">
+              <el-option label="自动" value="Auto" />
+              <el-option label="中文" value="Chinese" />
+              <el-option label="英文" value="English" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="使用流式" prop="qwen_tts.stream">
+            <el-switch v-model="form.qwen_tts.stream" />
+          </el-form-item>
+          <el-form-item label="帧时长" prop="qwen_tts.frame_duration">
+            <el-input-number v-model="form.qwen_tts.frame_duration" :min="1" :max="1000" style="width: 100%" />
           </el-form-item>
         </template>
 
@@ -447,6 +480,16 @@ const form = reactive({
     audio_format: 'mp3',
     instruct_text: '你好'
   },
+  qwen_tts: {
+    api_key: '',
+    api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+    region: 'beijing',
+    model: 'qwen3-tts-flash',
+    voice: 'Cherry',
+    language_type: 'Chinese',
+    stream: true,
+    frame_duration: 60
+  },
   doubao: {
     appid: '6886011847',
     access_token: 'access_token',
@@ -557,6 +600,17 @@ const generateConfig = () => {
       config.channels = form.edge_offline.channels
       config.frame_duration = form.edge_offline.frame_duration
       break
+    case 'aliyun_qwen':
+      config.provider = 'aliyun_qwen'
+      config.api_key = form.qwen_tts.api_key
+      config.api_url = form.qwen_tts.api_url
+      config.region = form.qwen_tts.region
+      config.model = form.qwen_tts.model || 'qwen3-tts-flash'
+      config.voice = form.qwen_tts.voice || 'Cherry'
+      config.language_type = form.qwen_tts.language_type || 'Chinese'
+      config.stream = form.qwen_tts.stream
+      config.frame_duration = form.qwen_tts.frame_duration || 60
+      break
     case 'openai':
       config.api_key = form.openai.api_key
       config.api_url = form.openai.api_url
@@ -630,7 +684,9 @@ const rules = {
   // 智谱 TTS 验证规则
   'zhipu.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
   // Minimax TTS 验证规则
-  'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
+  'minimax.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }],
+  // 千问 TTS 验证规则
+  'qwen_tts.api_key': [{ required: true, message: '请输入API Key', trigger: 'blur' }]
 }
 
 const loadConfigs = async () => {
@@ -699,6 +755,16 @@ const editConfig = (config) => {
         form.edge_offline.sample_rate = configData.sample_rate || 16000
         form.edge_offline.channels = configData.channels || 1
         form.edge_offline.frame_duration = configData.frame_duration || 20
+        break
+      case 'aliyun_qwen':
+        form.qwen_tts.api_key = configData.api_key || ''
+        form.qwen_tts.api_url = configData.api_url || 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation'
+        form.qwen_tts.region = configData.region || 'beijing'
+        form.qwen_tts.model = configData.model || 'qwen3-tts-flash'
+        form.qwen_tts.voice = configData.voice || 'Cherry'
+        form.qwen_tts.language_type = configData.language_type || 'Chinese'
+        form.qwen_tts.stream = configData.stream !== undefined ? configData.stream : true
+        form.qwen_tts.frame_duration = configData.frame_duration || 60
         break
       case 'openai':
         form.openai.api_key = configData.api_key || ''
@@ -858,6 +924,16 @@ const resetForm = () => {
       target_sr: 24000,
       audio_format: 'mp3',
       instruct_text: '你好'
+    },
+    qwen_tts: {
+      api_key: '',
+      api_url: 'https://dashscope.aliyuncs.com/api/v1/services/aigc/multimodal-generation/generation',
+      region: 'beijing',
+      model: 'qwen3-tts-flash',
+      voice: 'Cherry',
+      language_type: 'Chinese',
+      stream: true,
+      frame_duration: 60
     },
     doubao: {
       appid: '6886011847',

@@ -28,4 +28,5 @@ const (
 	TtsTypeOpenAI      = "openai"
 	TtsTypeZhipu       = "zhipu"
 	TtsTypeMinimax     = "minimax"
+	TtsTypeAliyunQwen  = "aliyun_qwen"
 )

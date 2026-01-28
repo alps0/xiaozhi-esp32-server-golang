@@ -607,7 +607,12 @@ const loadVoices = async (provider) => {
   
   voiceLoading.value = true
   try {
-    const response = await api.get(`/user/voice-options?provider=${provider}`)
+    const params = { provider }
+    // 如果有TTS配置ID，总是带上config_id参数
+    if (form.tts_config_id) {
+      params.config_id = form.tts_config_id
+    }
+    const response = await api.get('/user/voice-options', { params })
     availableVoices.value = response.data.data || []
     filteredVoices.value = availableVoices.value
   } catch (error) {

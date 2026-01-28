@@ -2,12 +2,14 @@ package controllers
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"math/rand"
 	"net/http"
 	"strconv"
 	"time"
+
 	"xiaozhi/manager/backend/models"
 
 	"github.com/gin-gonic/gin"
@@ -489,7 +491,40 @@ func (uc *UserController) GetVoiceOptions(c *gin.Context) {
 		return
 	}
 
-	// 根据provider获取音色列表
+	// 特殊处理：阿里云千问，根据配置中的模型过滤音色
+	if provider == "aliyun_qwen" {
+		configID := c.Query("config_id")
+		// 如果没有提供 config_id，则返回不区分模型的基础音色列表（用于管理员配置页等场景）
+		if configID == "" {
+			voices := GetVoiceOptionsByProvider("aliyun_qwen")
+			c.JSON(http.StatusOK, gin.H{"data": voices})
+		} else {
+			// 查找对应的 TTS 配置（type=tts）
+			var cfg models.Config
+			if err := uc.DB.Where("type = ? AND config_id = ?", "tts", configID).First(&cfg).Error; err != nil {
+				c.JSON(http.StatusBadRequest, gin.H{"error": "未找到对应的TTS配置"})
+				return
+			}
+
+			// 解析 json_data 获取 model
+			type qwenConfig struct {
+				Model string `json:"model"`
+			}
+			var qc qwenConfig
+			if cfg.JsonData != "" {
+				_ = json.Unmarshal([]byte(cfg.JsonData), &qc)
+			}
+			if qc.Model == "" {
+				qc.Model = "qwen3-tts-flash"
+			}
+
+			voices := GetAliyunQwenVoicesByModel(qc.Model)
+			c.JSON(http.StatusOK, gin.H{"data": voices})
+		}
+		return
+	}
+
+	// 其他 provider：根据provider获取固定音色列表
 	voices := GetVoiceOptionsByProvider(provider)
 	c.JSON(http.StatusOK, gin.H{"data": voices})
 }

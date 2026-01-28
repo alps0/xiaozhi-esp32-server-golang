@@ -1,5 +1,7 @@
 package controllers
 
+import "strings"
+
 // VoiceOption 音色选项
 type VoiceOption struct {
 	Value string `json:"value"` // 音色值
@@ -280,6 +282,34 @@ var VoiceOptions = map[string][]VoiceOption{
 		{Value: "English_Diligent_Man", Label: "Diligent Man"},
 		{Value: "English_Gentle-voiced_man", Label: "Gentle-voiced man"},
 	},
+
+	// 阿里云千问 TTS 音色列表（基础列表，模型过滤由 GetAliyunQwenVoicesByModel 处理）
+	"aliyun_qwen": {
+		{Value: "Cherry", Label: "芊悦"},
+		{Value: "Serena", Label: "苏瑶"},
+		{Value: "Ethan", Label: "晨煦"},
+		{Value: "Chelsie", Label: "千雪"},
+		{Value: "Momo", Label: "茉兔"},
+		{Value: "Vivian", Label: "十三"},
+		{Value: "Moon", Label: "月白"},
+		{Value: "Maia", Label: "四月"},
+		{Value: "Kai", Label: "凯"},
+		{Value: "Nofish", Label: "不吃鱼"},
+		{Value: "Bella", Label: "萌宝"},
+		{Value: "Jennifer", Label: "詹妮弗"},
+		{Value: "Ryan", Label: "甜茶"},
+	},
+
+	// 智谱 TTS 音色列表
+	"zhipu": {
+		{Value: "tongtong", Label: "彤彤（默认音色）"},
+		{Value: "chuichui", Label: "锤锤"},
+		{Value: "xiaochen", Label: "小陈"},
+		{Value: "jam", Label: "动动动物圈jam音色"},
+		{Value: "kazi", Label: "动动动物圈kazi音色"},
+		{Value: "douji", Label: "动动动物圈douji音色"},
+		{Value: "luodo", Label: "动动动物圈luodo音色"},
+	},
 }
 
 // GetVoiceOptionsByProvider 根据provider获取音色列表
@@ -288,4 +318,31 @@ func GetVoiceOptionsByProvider(provider string) []VoiceOption {
 		return voices
 	}
 	return []VoiceOption{}
+}
+
+// GetAliyunQwenVoicesByModel 根据千问模型名称获取音色列表
+// 使用 qwen 包中的模型映射来获取准确的音色列表
+func GetAliyunQwenVoicesByModel(model string) []VoiceOption {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		// 如果没有模型，返回基础列表
+		return GetVoiceOptionsByProvider("aliyun_qwen")
+	}
+	
+	// 使用本地函数获取模型对应的音色列表
+	voices := GetVoicesByModel(model)
+	if voices == nil || len(voices) == 0 {
+		// 如果找不到对应模型的音色，返回基础列表
+		return GetVoiceOptionsByProvider("aliyun_qwen")
+	}
+	
+	// 将 VoiceInfo 转换为 VoiceOption
+	result := make([]VoiceOption, 0, len(voices))
+	for _, v := range voices {
+		result = append(result, VoiceOption{
+			Value: v.Value,
+			Label: v.Label,
+		})
+	}
+	return result
 }
