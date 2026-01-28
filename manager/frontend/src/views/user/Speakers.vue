@@ -896,9 +896,12 @@ const handleTtsConfigChange = async (configId) => {
 
   try {
     // 从后端API获取该provider的完整音色列表
-    const response = await api.get('/user/voice-options', {
-      params: { provider: config.provider }
-    })
+    const params = { provider: config.provider }
+    // 总是带上config_id参数
+    if (configId) {
+      params.config_id = configId
+    }
+    const response = await api.get('/user/voice-options', { params })
     currentVoiceOptions.value = response.data.data || []
   } catch (error) {
     console.error('加载音色列表失败:', error)
