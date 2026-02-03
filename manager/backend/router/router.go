@@ -30,8 +30,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 	speakerGroupController := controllers.NewSpeakerGroupController(db, cfg)
 	poolStatsController := controllers.NewPoolStatsController()
 
-	// 初始化聊天历史控制器（需要配置）
-	cfg = config.Load()
+	// 初始化聊天历史控制器（使用传入的 cfg，不重新 Load 避免内嵌时读错路径）
 	audioBasePath := "./storage/chat_history/audio"
 	maxFileSize := int64(10 * 1024 * 1024) // 默认10MB
 	if cfg.History.AudioBasePath != "" {

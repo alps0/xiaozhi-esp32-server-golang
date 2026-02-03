@@ -254,7 +254,7 @@ func initVad() error {
 	log.Infof("开始初始化 VAD 模块...")
 	vadProvider := viper.GetString("vad.provider")
 	log.Infof("VAD 提供商: %s", vadProvider)
-	
+
 	// VAD 使用懒加载模式，将在首次使用时通过全局资源池自动初始化
 	log.Infof("VAD 模块将使用懒加载模式，在首次使用时自动初始化")
 	return nil

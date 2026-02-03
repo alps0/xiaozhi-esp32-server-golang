@@ -17,6 +17,8 @@ import (
 func main() {
 	// 解析命令行参数
 	configFile := flag.String("c", "config/config.yaml", "配置文件路径")
+	managerHTTPEnable := flag.Bool("manager-http-enable", false, "是否启用内嵌 manager HTTP")
+	managerHTTPConfig := flag.String("manager-http-config", "", "manager 配置文件路径，启用时必传")
 	flag.Parse()
 
 	if *configFile == "" {
@@ -24,6 +26,10 @@ func main() {
 		return
 	}
 
+	// 先启动 manager，再 Init，否则 Init 里 updateConfigFromAPI 会一直连不上 manager 导致卡死
+	if *managerHTTPEnable {
+		StartManagerHTTP(*managerHTTPConfig)
+	}
 	err := Init(*configFile)
 	if err != nil {
 		return
@@ -58,6 +64,9 @@ func main() {
 
 	// 停止周期性配置更新服务
 	StopPeriodicConfigUpdate()
+	if *managerHTTPEnable {
+		StopManagerHTTP()
+	}
 
 	log.Info("服务器已关闭")
 }
