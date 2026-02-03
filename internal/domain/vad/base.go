@@ -6,6 +6,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/domain/vad/inter"
 	// "xiaozhi-esp32-server-golang/internal/domain/vad/silero_vad"
 	"xiaozhi-esp32-server-golang/internal/domain/vad/ten_vad"
+
 	// "xiaozhi-esp32-server-golang/internal/domain/vad/webrtc_vad"
 )
 
@@ -45,4 +46,3 @@ func ReleaseVAD(vad inter.VAD) error {
 		return errors.New("invalid vad type")
 	}
 }
-
