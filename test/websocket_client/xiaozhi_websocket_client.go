@@ -99,6 +99,42 @@ var speectText = "你好测试"
 var clientId = "e4b0c442-98fc-4e1b-8c3d-6a5b6a5b6a6d"
 var token = "test-token"
 
+// serverVisionURL 从服务器 MCP initialize 消息中解析得到的 vision 接口地址
+var (
+	serverVisionURL   string
+	serverVisionURLMu sync.RWMutex
+)
+
+// parseAndSaveVisionURL 从 MCP initialize 的 payload 中解析 params.capabilities.vision.url 并保存
+func parseAndSaveVisionURL(payload json.RawMessage) {
+	var mcpMsg struct {
+		Method string `json:"method"`
+		Params struct {
+			Capabilities struct {
+				Vision struct {
+					URL string `json:"url"`
+				} `json:"vision"`
+			} `json:"capabilities"`
+		} `json:"params"`
+	}
+	if err := json.Unmarshal(payload, &mcpMsg); err != nil {
+		return
+	}
+	if mcpMsg.Method == "initialize" && mcpMsg.Params.Capabilities.Vision.URL != "" {
+		serverVisionURLMu.Lock()
+		serverVisionURL = mcpMsg.Params.Capabilities.Vision.URL
+		serverVisionURLMu.Unlock()
+		fmt.Printf("已保存服务器下发的 vision_url: %s\n", serverVisionURL)
+	}
+}
+
+// GetServerVisionURL 返回服务器下发的 vision 接口地址，未下发时返回空字符串
+func GetServerVisionURL() string {
+	serverVisionURLMu.RLock()
+	defer serverVisionURLMu.RUnlock()
+	return serverVisionURL
+}
+
 func main() {
 	// 解析命令行参数
 	serverAddr := flag.String("server", "ws://localhost:8989/xiaozhi/v1/", "服务器地址")
@@ -196,6 +232,10 @@ func runClient(serverAddr, deviceID, audioFile string) error {
 				}
 
 				if serverMsg.Type == "mcp" {
+					// 从 MCP initialize 消息中解析服务器下发的 vision_url
+					if len(serverMsg.PayLoad) > 0 {
+						parseAndSaveVisionURL(serverMsg.PayLoad)
+					}
 					select {
 					case mcpRecvMsgChan <- serverMsg.PayLoad:
 					default:
@@ -528,17 +568,7 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 		"instruct_text":  "你好",
 	}
 	_ = cosyVoiceConfig
-	/**
-		    "edge": {
-	      "voice": "zh-CN-XiaoxiaoNeural",
-	      "rate": "+0%",
-	      "volume": "+0%",
-	      "pitch": "+0Hz",
-	      "connect_timeout": 10,
-	      "receive_timeout": 60
-	    }
-	*/
-	/*edgeConfig := map[string]interface{}{
+	edgeConfig := map[string]interface{}{
 		"voice":           "zh-CN-XiaoxiaoNeural",
 		"rate":            "+0%",
 		"volume":          "+0%",
@@ -546,16 +576,22 @@ func sendTextToSpeech(conn *websocket.Conn, deviceID string) error {
 		"connect_timeout": 10,
 		"receive_timeout": 60,
 	}
+	edgeOfflineConfig := map[string]interface{}{
+		"server_url":        "ws://192.168.208.214:8081/tts",
+		"timeout":           30.0,
+		"handshake_timeout": 10.0,
+	}
 	_ = edgeConfig
-	//调用tts服务生成语音
-	ttsProvider, err := tts.GetTTSProvider("edge", edgeConfig)
-	if err != nil {
-		return fmt.Errorf("获取tts服务失败: %v", err)
-	}*/
-	ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	_ = edgeOfflineConfig
+	//调用tts服务生成语音（可改为 "edge_offline", edgeOfflineConfig 使用本地 TTS 服务）
+	ttsProvider, err := tts.GetTTSProvider("edge_offline", edgeOfflineConfig)
 	if err != nil {
 		return fmt.Errorf("获取tts服务失败: %v", err)
 	}
+	/*ttsProvider, err := tts.GetTTSProvider("cosyvoice", cosyVoiceConfig)
+	if err != nil {
+		return fmt.Errorf("获取tts服务失败: %v", err)
+	}*/
 
 	/*
 		audioData, err := ttsProvider.TextToSpeech(context.Background(), "你叫什么名字?")

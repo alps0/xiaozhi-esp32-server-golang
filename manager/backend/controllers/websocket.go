@@ -147,6 +147,16 @@ func (ctrl *WebSocketController) IsClientConnected(uuid string) bool {
 	return false
 }
 
+// GetFirstConnectedClientUUID 返回第一个已连接客户端的 UUID，用于配置测试等场景
+func (ctrl *WebSocketController) GetFirstConnectedClientUUID() string {
+	for item := range ctrl.clientsMap.IterBuffered() {
+		if client := item.Val; client.isConnected {
+			return client.ID
+		}
+	}
+	return ""
+}
+
 // 向指定UUID的客户端发送消息
 func (ctrl *WebSocketController) SendToClient(uuid string, message interface{}) error {
 	if client, exists := ctrl.clientsMap.Get(uuid); exists && client.isConnected {
@@ -164,6 +174,11 @@ func (ctrl *WebSocketController) Broadcast(message interface{}) {
 			}
 		}
 	}
+}
+
+// BroadcastSystemConfig 向所有连接的客户端推送系统配置变更，格式与 GET /api/system/configs 一致：{"type":"system_config","data":{...}}
+func (ctrl *WebSocketController) BroadcastSystemConfig(data gin.H) {
+	ctrl.Broadcast(gin.H{"type": "system_config", "data": data})
 }
 
 // 客户端消息处理
@@ -567,10 +582,10 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 
 	// 创建响应通道用于接收响应
 	responseChan := make(chan *WebSocketResponse, 10)
-	
+
 	// 创建唯一的请求ID
 	requestID := uuid.New().String()
-	
+
 	// 响应处理器
 	responseHandler := func(response *WebSocketResponse) {
 		select {
@@ -583,7 +598,7 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 	// 为每个客户端注册回调
 	var callbackMutex sync.Mutex
 	callbacksRegistered := 0
-	
+
 	for item := range ctrl.clientsMap.IterBuffered() {
 		client := item.Val
 		if client.isConnected {
@@ -593,7 +608,7 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 			client.mu.Unlock()
 			callbacksRegistered++
 			callbackMutex.Unlock()
-			
+
 			// 发送请求到客户端
 			request := WebSocketRequest{
 				ID:     requestID,
@@ -601,7 +616,7 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 				Path:   "/api/mcp/tools",
 				Body:   body,
 			}
-			
+
 			if err := client.conn.WriteJSON(request); err != nil {
 				log.Printf("向客户端 %s 发送MCP工具列表请求失败: %v", client.ID, err)
 			} else {
@@ -628,7 +643,7 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 	// 等待所有客户端响应或超时，寻找第一个非空工具列表
 	timeout := time.After(30 * time.Second)
 	responsesReceived := 0
-	
+
 	for {
 		select {
 		case response := <-responseChan:
@@ -694,7 +709,7 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 		case <-timeout:
 			log.Printf("请求超时，已收到%d个响应", responsesReceived)
 			return nil, fmt.Errorf("请求超时")
-			
+
 		case <-ctx.Done():
 			log.Printf("上下文取消，已收到%d个响应", responsesReceived)
 			return nil, fmt.Errorf("上下文取消")

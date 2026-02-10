@@ -1,11 +1,18 @@
 package controllers
 
 import (
+	"bytes"
+	"context"
+	"crypto/hmac"
+	"crypto/sha256"
+	"crypto/tls"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"log"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -15,8 +22,10 @@ import (
 
 	"xiaozhi/manager/backend/models"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"github.com/gin-gonic/gin"
 	"github.com/golang-jwt/jwt/v4"
+	"github.com/gorilla/websocket"
 	"golang.org/x/crypto/bcrypt"
 	"gopkg.in/yaml.v3"
 	"gorm.io/gorm"
@@ -254,13 +263,11 @@ func (ac *AdminController) GetDeviceConfigs(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"data": response})
 }
 
-// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm
-func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
-	// 一次性获取所有相关配置（包括启用和未启用的）
+// getSystemConfigsData 获取系统配置数据（与 GetSystemConfigs 返回的 data 一致），供接口与 WebSocket 推送复用
+func (ac *AdminController) getSystemConfigsData() (gin.H, error) {
 	var allConfigs []models.Config
-	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm"}).Find(&allConfigs).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
-		return
+	if err := ac.DB.Where("type IN (?)", []string{"mqtt", "mqtt_server", "udp", "ota", "mcp", "local_mcp", "voice_identify", "tts", "vad", "asr", "llm", "vision"}).Find(&allConfigs).Error; err != nil {
+		return nil, err
 	}
 
 	// 按类型分组配置
@@ -269,58 +276,57 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		configsByType[config.Type] = append(configsByType[config.Type], config)
 	}
 
-	// 为每种类型选择最佳配置并解析json_data
-	selectAndParseConfig := func(configs []models.Config) interface{} {
-		var selectedConfig models.Config
-		// 优先选择默认配置
-		for _, config := range configs {
-			if config.IsDefault {
-				selectedConfig = config
-				break
+	// 从 configs 中选出“当前使用”的一条：默认配置优先，否则第一条
+	getSelectedConfig := func(configs []models.Config) *models.Config {
+		if len(configs) == 0 {
+			return nil
+		}
+		for i := range configs {
+			if configs[i].IsDefault {
+				return &configs[i]
 			}
 		}
+		return &configs[0]
+	}
 
-		// 如果没有默认配置，选择第一个配置
-		if selectedConfig.ID == 0 {
-			selectedConfig = configs[0]
+	// 为每种类型选择最佳配置并解析json_data
+	selectAndParseConfig := func(configs []models.Config) interface{} {
+		selected := getSelectedConfig(configs)
+		if selected == nil {
+			return nil
 		}
 
 		// 解析json_data
-		if selectedConfig.JsonData != "" {
+		if selected.JsonData != "" {
 			var parsedData interface{}
-			if err := json.Unmarshal([]byte(selectedConfig.JsonData), &parsedData); err != nil {
-				// 如果解析失败，返回原始json_data字符串
+			if err := json.Unmarshal([]byte(selected.JsonData), &parsedData); err != nil {
 				result := gin.H{
-					"name": selectedConfig.Name,
-					"type": selectedConfig.Type,
-					"data": selectedConfig.JsonData,
+					"name": selected.Name,
+					"type": selected.Type,
+					"data": selected.JsonData,
 				}
 				return result
 			}
 
-			// 将解析后的数据包装在正确的格式中
 			result := gin.H{
-				"name": selectedConfig.Name,
-				"type": selectedConfig.Type,
+				"name": selected.Name,
+				"type": selected.Type,
 			}
 			if parsedData != nil {
-				// 如果解析的数据是map类型，直接合并
 				if dataMap, ok := parsedData.(map[string]interface{}); ok {
 					for k, v := range dataMap {
 						result[k] = v
 					}
 				} else {
-					// 否则作为data字段
 					result["data"] = parsedData
 				}
 			}
 			return result
 		}
 
-		// 如果没有json_data，返回基本配置信息
 		return gin.H{
-			"name": selectedConfig.Name,
-			"type": selectedConfig.Type,
+			"name": selected.Name,
+			"type": selected.Type,
 		}
 	}
 
@@ -409,15 +415,23 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		return result, nil
 	}
 
-	// 构建响应数据
+	// 构建响应数据。DB 的 enabled 列仅用于 vad/asr/llm/tts 等列表项的开关；mqtt/mqtt_server 的业务启用由 json_data 中的 enable 表示，不再用 DB 列覆盖
 	response := gin.H{}
 
-	// 只有当配置存在时才添加到响应中
 	if configs, exists := configsByType["mqtt"]; exists && len(configs) > 0 {
-		response["mqtt"] = selectAndParseConfig(configs)
+		data := selectAndParseConfig(configs)
+		/*if b, err := json.Marshal(data); err == nil {
+			log.Printf("[getSystemConfigsData] mqtt 配置: %s", string(b))
+		}*/
+		response["mqtt"] = data
+
 	}
 	if configs, exists := configsByType["mqtt_server"]; exists && len(configs) > 0 {
-		response["mqtt_server"] = selectAndParseConfig(configs)
+		data := selectAndParseConfig(configs)
+		if b, err := json.Marshal(data); err == nil {
+			log.Printf("[getSystemConfigsData] mqtt_server 配置: %s", string(b))
+		}
+		response["mqtt_server"] = data
 	}
 	if configs, exists := configsByType["udp"]; exists && len(configs) > 0 {
 		response["udp"] = selectAndParseConfig(configs)
@@ -442,46 +456,30 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		response["local_mcp"] = selectAndParseConfig(configs)
 	}
 
-	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold 和 enabled）
-	// 优先使用环境变量 SPEAKER_SERVICE_URL，如果未定义则从数据库配置获取
+	// 处理 voice_identify 配置（与控制台配置结构一致，包含 base_url、threshold、enable）
+	// 业务启用由 json_data 中的 enable 表示；DB 的 enabled 列仅作列表项开关，不覆盖业务 enable
 	baseURL := os.Getenv("SPEAKER_SERVICE_URL")
 	enabled := true  // 默认启用
 	threshold := 0.4 // 默认阈值
 
-	// 从数据库配置获取 base_url、threshold 和 enabled 状态
 	if configs, exists := configsByType["voice_identify"]; exists && len(configs) > 0 {
-		var selectedConfig models.Config
-		// 优先选择默认配置
-		for _, config := range configs {
-			if config.IsDefault {
-				selectedConfig = config
-				break
-			}
-		}
-		// 如果没有默认配置，选择第一个配置
-		if selectedConfig.ID == 0 {
-			selectedConfig = configs[0]
-		}
-
-		// 获取 enabled 状态
-		enabled = selectedConfig.Enabled
-
-		// 如果环境变量未定义，从数据库配置获取 base_url 和 threshold
-		if selectedConfig.JsonData != "" {
+		selected := getSelectedConfig(configs)
+		if selected != nil && selected.JsonData != "" {
 			var configData map[string]interface{}
-			if err := json.Unmarshal([]byte(selectedConfig.JsonData), &configData); err == nil {
-				// 从 service.base_url 提取 base_url，与控制台配置结构一致
+			if err := json.Unmarshal([]byte(selected.JsonData), &configData); err == nil {
+				// 业务 enable 优先从 json_data 读取
+				if v, ok := configData["enable"]; ok {
+					if b, ok := v.(bool); ok {
+						enabled = b
+					}
+				}
 				if service, ok := configData["service"].(map[string]interface{}); ok {
 					if url, ok := service["base_url"].(string); ok && url != "" && baseURL == "" {
 						baseURL = url
 					}
-					// 读取阈值配置
 					if thresholdVal, ok := service["threshold"]; ok {
-						if thresholdFloat, ok := thresholdVal.(float64); ok {
-							// 验证阈值范围
-							if thresholdFloat >= 0 && thresholdFloat <= 1 {
-								threshold = thresholdFloat
-							}
+						if thresholdFloat, ok := thresholdVal.(float64); ok && thresholdFloat >= 0 && thresholdFloat <= 1 {
+							threshold = thresholdFloat
 						}
 					}
 				}
@@ -654,12 +652,954 @@ func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
 		}
 	}
 
+	// 处理 Vision 配置：与 config.yaml 结构一致，vision_base + vllm（顶层 provider + 子项仅业务字段）
+	if visionConfigs, exists := configsByType["vision"]; exists && len(visionConfigs) > 0 {
+		visionResponse := make(gin.H)
+		vllmMap := make(gin.H)
+		var defaultVisionConfigID string
+		for _, config := range visionConfigs {
+			if config.ConfigID == "vision_base" {
+				if config.JsonData != "" {
+					var baseData map[string]interface{}
+					if err := json.Unmarshal([]byte(config.JsonData), &baseData); err == nil {
+						for k, v := range baseData {
+							visionResponse[k] = v
+						}
+					}
+				}
+				continue
+			}
+			if config.Enabled {
+				configData := make(map[string]interface{})
+				if config.JsonData != "" {
+					json.Unmarshal([]byte(config.JsonData), &configData)
+				}
+				if config.IsDefault {
+					defaultVisionConfigID = config.ConfigID
+				}
+				// 与 YAML 一致：子项只存业务配置，不含 name/provider/is_default
+				vllmMap[config.ConfigID] = configData
+			}
+		}
+		if len(vllmMap) > 0 {
+			if defaultVisionConfigID != "" {
+				vllmMap["provider"] = defaultVisionConfigID
+			}
+			visionResponse["vllm"] = vllmMap
+		}
+		if len(visionResponse) > 0 {
+			response["vision"] = visionResponse
+		}
+	}
+
 	// 处理 VAD 配置
 	if configs, exists := configsByType["vad"]; exists && len(configs) > 0 {
 		response["vad"] = selectAndParseConfig(configs)
 	}
 
-	c.JSON(http.StatusOK, gin.H{"data": response})
+	// 处理 Vision 配置：vision_base 为顶层字段，其余为 vision.vllm[config_id]
+	// config.Enabled 此处仅作列表项开关（该条配置是否纳入返回），业务相关字段来自 json_data
+	if visionConfigs, exists := configsByType["vision"]; exists && len(visionConfigs) > 0 {
+		visionMap := make(gin.H)
+		for _, config := range visionConfigs {
+			if !config.Enabled {
+				continue
+			}
+			configData := make(map[string]interface{})
+			if config.JsonData != "" {
+				json.Unmarshal([]byte(config.JsonData), &configData)
+			}
+			if config.ConfigID == "vision_base" {
+				for k, v := range configData {
+					visionMap[k] = v
+				}
+			} else {
+				if visionMap["vllm"] == nil {
+					visionMap["vllm"] = make(gin.H)
+				}
+				if vllmConfig, ok := visionMap["vllm"].(gin.H); ok {
+					if config.IsDefault {
+						vllmConfig["provider"] = config.ConfigID
+					}
+					vllmConfig[config.ConfigID] = configData
+				}
+			}
+		}
+		if len(visionMap) > 0 {
+			response["vision"] = visionMap
+		}
+	}
+
+	return response, nil
+}
+
+// GetSystemConfigs 获取系统配置信息，包括mqtt, mqtt_server, udp, ota, mcp, local_mcp, voice_identify, tts, vad, asr, llm, vision
+func (ac *AdminController) GetSystemConfigs(c *gin.Context) {
+	data, err := ac.getSystemConfigsData()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "Failed to get system configs"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"data": data})
+}
+
+// notifySystemConfigChanged 在 Save 成功后调用：先同步拉取最新配置，再异步推送，保证推送的是保存后的数据
+func (ac *AdminController) notifySystemConfigChanged() {
+	if ac.WebSocketController == nil {
+		return
+	}
+	data, err := ac.getSystemConfigsData()
+	if err != nil {
+		return
+	}
+	go ac.WebSocketController.BroadcastSystemConfig(data)
+}
+
+// TestConfigs 一键测试配置：OTA 在 manager 内测，VAD/ASR/LLM/TTS 经 WebSocket 发主程序测，结果按 config_id 对应
+// 请求体可选 data：若提供某类型（vad/asr/llm/tts），则用该 data 覆盖 DB 作为下发主程序的配置（用于未保存草稿测试）
+func (ac *AdminController) TestConfigs(c *gin.Context) {
+	var body struct {
+		Types      []string               `json:"types"`       // 要测试的类型：ota, vad, asr, llm, tts
+		ConfigIDs  map[string][]string    `json:"config_ids"`  // 按类型指定 config_id 列表，不传则测该类型全部已启用
+		ClientUUID string                 `json:"client_uuid"` // 指定主程序连接，不传则任选一个
+		Data       map[string]interface{} `json:"data"`        // 可选，按类型覆盖配置源（用于编辑态/向导未保存测试）
+	}
+	_ = c.ShouldBindJSON(&body)
+	if len(body.Types) == 0 {
+		body.Types = []string{"ota", "vad", "asr", "llm", "tts"}
+	}
+	if body.ConfigIDs == nil {
+		body.ConfigIDs = make(map[string][]string)
+	}
+
+	result := gin.H{
+		"ota": gin.H{},
+		"vad": gin.H{},
+		"asr": gin.H{},
+		"llm": gin.H{},
+		"tts": gin.H{},
+	}
+
+	// OTA：优先用请求体 data.ota（页面表单），否则从 DB 加载
+	if contains(body.Types, "ota") {
+		var otaData map[string]interface{}
+		if body.Data != nil {
+			otaData, _ = body.Data["ota"].(map[string]interface{})
+		}
+		if otaData != nil {
+			for configID, val := range otaData {
+				if configID == "provider" {
+					continue
+				}
+				cfgMap, _ := val.(map[string]interface{})
+				if cfgMap == nil {
+					result["ota"].(gin.H)[configID] = gin.H{"ok": false, "message": "配置格式无效"}
+					continue
+				}
+				jsonBytes, err := json.Marshal(cfgMap)
+				if err != nil {
+					result["ota"].(gin.H)[configID] = gin.H{"ok": false, "message": "配置序列化失败"}
+					continue
+				}
+				cfg := models.Config{ConfigID: configID, JsonData: string(jsonBytes)}
+				otaResult := ac.testOTAConfigWithMQTTUDP(cfg)
+				// 将OTATestResult转换为gin.H格式，保持向后兼容
+				result["ota"].(gin.H)[configID] = gin.H{
+					"ok":              otaResult.WebSocket.Ok && (otaResult.MQTTUDP == nil || otaResult.MQTTUDP.Ok),
+					"message":         otaResult.WebSocket.Message,
+					"first_packet_ms": otaResult.WebSocket.FirstPacketMs,
+					"websocket":       otaResult.WebSocket,
+					"mqtt_udp":        otaResult.MQTTUDP,
+					"ota_response":    otaResult.OTAResponse, // 添加OTA响应体
+				}
+			}
+		} else {
+			q := ac.DB.Where("type = ? AND enabled = ?", "ota", true)
+			if ids := body.ConfigIDs["ota"]; len(ids) > 0 {
+				q = q.Where("config_id IN ?", ids)
+			}
+			var otaConfigs []models.Config
+			if err := q.Find(&otaConfigs).Error; err != nil {
+				result["ota"] = gin.H{"_error": gin.H{"ok": false, "message": "获取OTA配置失败"}}
+			} else if len(otaConfigs) == 0 {
+				result["ota"] = gin.H{"_none": gin.H{"ok": false, "message": "未配置或未启用OTA"}}
+			} else {
+				for _, cfg := range otaConfigs {
+					otaResult := ac.testOTAConfigWithMQTTUDP(cfg)
+					// 将OTATestResult转换为gin.H格式，保持向后兼容
+					result["ota"].(gin.H)[cfg.ConfigID] = gin.H{
+						"ok":              otaResult.WebSocket.Ok && (otaResult.MQTTUDP == nil || otaResult.MQTTUDP.Ok),
+						"message":         otaResult.WebSocket.Message,
+						"first_packet_ms": otaResult.WebSocket.FirstPacketMs,
+						"websocket":       otaResult.WebSocket,
+						"mqtt_udp":        otaResult.MQTTUDP,
+						"ota_response":    otaResult.OTAResponse, // 添加OTA响应体
+					}
+				}
+			}
+		}
+	}
+
+	// VAD/ASR/LLM/TTS：经 WebSocket 发主程序
+	needMainProgram := contains(body.Types, "vad") || contains(body.Types, "asr") || contains(body.Types, "llm") || contains(body.Types, "tts")
+	if needMainProgram && ac.WebSocketController != nil {
+		clientUUID := body.ClientUUID
+		if clientUUID == "" {
+			clientUUID = ac.WebSocketController.GetFirstConnectedClientUUID()
+		}
+		if clientUUID == "" {
+			noClient := gin.H{"ok": false, "message": "无主程序连接，无法测试"}
+			if contains(body.Types, "vad") {
+				result["vad"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "asr") {
+				result["asr"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "llm") {
+				result["llm"] = gin.H{"_no_client": noClient}
+			}
+			if contains(body.Types, "tts") {
+				result["tts"] = gin.H{"_no_client": noClient}
+			}
+		} else {
+			fullData, err := ac.getSystemConfigsData()
+			if err != nil {
+				fillResultError(result, body.Types, "vad", "asr", "llm", "tts", "获取系统配置失败")
+			} else {
+				for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+					if v, ok := fullData[typ]; ok {
+						if m, ok := v.(map[string]interface{}); ok {
+							log.Printf("[config_test] fullData[%s] keys: %v", typ, getMapKeys(m))
+						}
+					} else {
+						log.Printf("[config_test] fullData[%s] 不存在", typ)
+					}
+				}
+				// 若请求体带了 data 且某类型有值，则用 body.Data 覆盖该类型的配置源；否则用 fullData
+				subset := gin.H{}
+				for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+					if !contains(body.Types, typ) {
+						continue
+					}
+					var typeMap map[string]interface{}
+					if body.Data != nil {
+						if v, ok := body.Data[typ]; ok {
+							if m, ok := v.(map[string]interface{}); ok && len(m) > 0 {
+								typeMap = m
+								log.Printf("[config_test] 使用请求体 data[%s] 作为配置源", typ)
+							}
+						}
+					}
+					if typeMap == nil {
+						if v, ok := fullData[typ]; ok {
+							typeMap, _ = v.(map[string]interface{})
+						}
+					}
+					ids := body.ConfigIDs[typ]
+					if len(ids) > 0 {
+						filtered := make(map[string]interface{})
+						for _, id := range ids {
+							if typeMap != nil {
+								if val, exists := typeMap[id]; exists {
+									filtered[id] = val
+									continue
+								}
+							}
+							// fullData 中无该 id（如未启用），从 DB 按 type+config_id 查一条并加入
+							item := ac.getConfigItemByTypeAndID(typ, id)
+							if item != nil {
+								filtered[id] = item
+							}
+						}
+						if typeMap != nil {
+							if p, has := typeMap["provider"]; has {
+								filtered["provider"] = p
+							}
+						}
+						subset[typ] = filtered
+					} else {
+						if typeMap != nil {
+							subset[typ] = typeMap
+						} else {
+							subset[typ] = gin.H{}
+						}
+					}
+				}
+				reqBody := map[string]interface{}{
+					"data":      subset,
+					"test_text": "配置测试",
+				}
+				// 发送前打印下发的配置摘要，便于 debug
+				log.Printf("[config_test] 发送请求 client=%s data 各类型条目数: vad=%d asr=%d llm=%d tts=%d",
+					clientUUID,
+					countSubsetKeys(subset["vad"]), countSubsetKeys(subset["asr"]),
+					countSubsetKeys(subset["llm"]), countSubsetKeys(subset["tts"]))
+				ctx, cancel := context.WithTimeout(c.Request.Context(), 25*time.Second)
+				defer cancel()
+				resp, err := ac.WebSocketController.SendRequestToClient(ctx, clientUUID, "POST", "/api/config/test", reqBody)
+				if err != nil {
+					fillResultError(result, body.Types, "vad", "asr", "llm", "tts", "主程序测试请求失败: "+err.Error())
+				} else if resp.Status != 200 {
+					errMsg := resp.Error
+					if errMsg == "" && resp.Body != nil {
+						if e, _ := resp.Body["error"].(string); e != "" {
+							errMsg = e
+						}
+					}
+					fillResultError(result, body.Types, "vad", "asr", "llm", "tts", errMsg)
+				} else if resp.Status == 200 {
+					if resp.Body == nil {
+						for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+							if contains(body.Types, typ) {
+								result[typ] = gin.H{"_error": gin.H{"ok": false, "message": "主程序未返回测试数据"}}
+							}
+						}
+					} else {
+						for _, typ := range []string{"vad", "asr", "llm", "tts"} {
+							if r, ok := resp.Body[typ].(map[string]interface{}); ok {
+								result[typ] = r
+							} else if contains(body.Types, typ) && resp.Body[typ] != nil {
+								result[typ] = gin.H{"_error": gin.H{"ok": false, "message": "响应格式异常"}}
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+
+	c.JSON(http.StatusOK, gin.H{"data": result})
+}
+
+func contains(s []string, x string) bool {
+	for _, v := range s {
+		if v == x {
+			return true
+		}
+	}
+	return false
+}
+
+// countSubsetKeys 统计 subset 中除 provider 外的 config 条目数，用于 debug 日志
+func countSubsetKeys(v interface{}) int {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	n := 0
+	for k := range m {
+		if k != "provider" {
+			n++
+		}
+	}
+	return n
+}
+
+// getConfigItemByTypeAndID 按 type+config_id 从 DB 查一条配置，返回与 getSystemConfigsData 一致的 configItem 结构（供测试请求指定 config_ids 时补全）
+func (ac *AdminController) getConfigItemByTypeAndID(typ, configID string) map[string]interface{} {
+	var config models.Config
+	if err := ac.DB.Where("type = ? AND config_id = ?", typ, configID).First(&config).Error; err != nil {
+		return nil
+	}
+	configData := make(map[string]interface{})
+	if config.JsonData != "" {
+		_ = json.Unmarshal([]byte(config.JsonData), &configData)
+	}
+	item := gin.H{
+		"name":       config.Name,
+		"is_default": config.IsDefault,
+	}
+	for k, v := range configData {
+		item[k] = v
+	}
+	// 补全 provider（引擎类型），主程序资源池创建依赖此字段
+	if config.Provider != "" {
+		item["provider"] = config.Provider
+	}
+	return item
+}
+
+func fillResultError(result gin.H, types []string, keys ...string) {
+	msg := gin.H{"ok": false, "message": "请求异常"}
+	for _, k := range keys {
+		if contains(types, k) {
+			result[k] = gin.H{"_error": msg}
+		}
+	}
+}
+
+// OTATestResult OTA测试结果结构
+type OTATestResult struct {
+	WebSocket   OTATestItem `json:"websocket"`
+	MQTTUDP     *OTATestItem `json:"mqtt_udp,omitempty"`
+	OTAResponse string       `json:"ota_response,omitempty"` // OTA接口响应内容
+}
+
+// OTATestItem 单个测试项结果
+type OTATestItem struct {
+	Ok            bool   `json:"ok"`
+	Message       string `json:"message"`
+	FirstPacketMs int64  `json:"first_packet_ms"`
+}
+
+// MQTTUDPTestConfig MQTT UDP测试配置
+type MQTTUDPTestConfig struct {
+	Endpoint       string `json:"endpoint"`
+	ClientID       string `json:"client_id"`
+	Username       string `json:"username"`
+	Password       string `json:"password"`
+	PublishTopic   string `json:"publish_topic"`
+	SubscribeTopic string `json:"subscribe_topic"`
+}
+
+// UDPConfig UDP配置（从hello响应中获取）
+type UDPConfig struct {
+	Server     string `json:"server"`
+	Port       int    `json:"port"`
+	Encryption string `json:"encryption"`
+	Key        string `json:"key"`
+	Nonce      string `json:"nonce"`
+}
+
+// helloMessage MQTT hello消息结构
+type helloMessage struct {
+	Type      string      `json:"type"`
+	Version   int         `json:"version"`
+	Transport string      `json:"transport"`
+	AudioParams interface{} `json:"audio_params,omitempty"`
+}
+
+// helloResponse MQTT hello响应结构（与test/mqtt_udp保持一致）
+type helloResponse struct {
+	Type      string    `json:"type"`
+	SessionID string    `json:"session_id"`
+	Transport string    `json:"transport"`
+	UDP       UDPConfig `json:"udp"`
+	Version   int       `json:"version"`
+	AudioParams struct {
+		Format        string `json:"format"`
+		SampleRate    int    `json:"sample_rate"`
+		Channels      int    `json:"channels"`
+		FrameDuration int    `json:"frame_duration"`
+	} `json:"audio_params"`
+}
+
+const (
+	otaTestDeviceID = "ota-test-device"
+	otaTestClientID = "ota-test-client"
+	otaHTTPPath     = "/xiaozhi/ota/"
+)
+
+// testMQTTUDPConfig 测试MQTT UDP连接
+// 参考 test/mqtt_udp 逻辑：设置默认消息处理器，发送hello，等待响应
+// 返回 ok, message, 耗时(ms)
+func testMQTTUDPConfig(mqttConfig MQTTUDPTestConfig) (bool, string, int64) {
+	t0 := time.Now()
+
+	// 验证MQTT配置完整性
+	if mqttConfig.Endpoint == "" {
+		return false, "MQTT endpoint为空，请检查配置", 0
+	}
+	if mqttConfig.ClientID == "" {
+		return false, "MQTT ClientID为空", 0
+	}
+	if mqttConfig.PublishTopic == "" {
+		return false, "MQTT发布主题为空", 0
+	}
+	// 注意：不需要校验 subscribe_topic，也不需要主动订阅
+
+	// 解析endpoint
+	endpoint := mqttConfig.Endpoint
+	port := "1883"
+	protocol := "tcp"
+	if strings.Contains(endpoint, ":") {
+		parts := strings.Split(endpoint, ":")
+		if len(parts) != 2 {
+			return false, "MQTT endpoint格式错误，应为 host:port", 0
+		}
+		endpoint = parts[0]
+		port = parts[1]
+		// 验证端口号
+		if _, err := strconv.Atoi(port); err != nil {
+			return false, "MQTT端口号无效: " + port, 0
+		}
+	}
+	if port == "8883" || port == "8884" {
+		protocol = "tls"
+	}
+	brokerURL := fmt.Sprintf("%s://%s:%s", protocol, endpoint, port)
+
+	// 等待hello响应的channel
+	helloChan := make(chan *helloResponse, 1)
+	errChan := make(chan error, 1)
+
+	// 创建MQTT客户端选项
+	opts := mqtt.NewClientOptions()
+	opts.AddBroker(brokerURL)
+	opts.SetClientID(mqttConfig.ClientID)
+	opts.SetUsername(mqttConfig.Username)
+	opts.SetPassword(mqttConfig.Password)
+	opts.SetKeepAlive(60 * time.Second)
+	opts.SetConnectTimeout(5 * time.Second)
+	opts.SetCleanSession(true)
+	opts.SetAutoReconnect(false) // 测试时禁用自动重连
+
+	// 设置默认消息处理器（参考 test/mqtt_udp）
+	opts.SetDefaultPublishHandler(func(client mqtt.Client, msg mqtt.Message) {
+		// 解析消息
+		var message map[string]interface{}
+		if err := json.Unmarshal(msg.Payload(), &message); err != nil {
+			errChan <- fmt.Errorf("解析消息失败: %v", err)
+			return
+		}
+		// 根据消息类型处理
+		msgType, ok := message["type"].(string)
+		if !ok {
+			return
+		}
+		if msgType == "hello" {
+			var resp helloResponse
+			if err := json.Unmarshal(msg.Payload(), &resp); err != nil {
+				errChan <- fmt.Errorf("解析hello响应失败: %v", err)
+				return
+			}
+			helloChan <- &resp
+		}
+	})
+
+	// 设置TLS配置（如果是SSL/TLS）
+	if protocol == "tls" {
+		tlsConfig := &tls.Config{
+			InsecureSkipVerify: true, // 测试环境跳过证书验证
+		}
+		opts.SetTLSConfig(tlsConfig)
+	}
+
+	// 连接MQTT
+	client := mqtt.NewClient(opts)
+	connectToken := client.Connect()
+	if connectToken.Wait() && connectToken.Error() != nil {
+		errMsg := connectToken.Error().Error()
+		// 提供更详细的错误信息
+		if strings.Contains(errMsg, "connection refused") {
+			return false, fmt.Sprintf("MQTT服务器拒绝连接 (%s:%s)，请检查服务器是否启动", endpoint, port), time.Since(t0).Milliseconds()
+		} else if strings.Contains(errMsg, "i/o timeout") {
+			return false, fmt.Sprintf("MQTT连接超时 (%s:%s)，请检查网络和防火墙", endpoint, port), time.Since(t0).Milliseconds()
+		} else if strings.Contains(errMsg, "authentication") || strings.Contains(errMsg, "not authorized") {
+			return false, "MQTT认证失败，请检查用户名和密码（由签名密钥生成）", time.Since(t0).Milliseconds()
+		}
+		return false, "MQTT连接失败: " + errMsg, time.Since(t0).Milliseconds()
+	}
+	defer client.Disconnect(250)
+
+	mqttConnectMs := time.Since(t0).Milliseconds()
+
+	// 创建hello消息并发送
+	helloMsg := helloMessage{
+		Type:      "hello",
+		Version:   3,
+		Transport: "udp",
+		AudioParams: map[string]interface{}{
+			"format":         "opus",
+			"sample_rate":    16000,
+			"channels":       1,
+			"frame_duration": 60,
+		},
+	}
+	helloData, err := json.Marshal(helloMsg)
+	if err != nil {
+		return false, "构建hello消息失败: " + err.Error(), mqttConnectMs
+	}
+
+	// 发布hello消息（不需要主动订阅，等待默认消息处理器接收响应）
+	pubToken := client.Publish(mqttConfig.PublishTopic, 0, false, helloData)
+	if pubToken.Wait() && pubToken.Error() != nil {
+		return false, "发布hello消息失败 (" + mqttConfig.PublishTopic + "): " + pubToken.Error().Error(), mqttConnectMs
+	}
+
+	// 等待hello响应（超时5秒）
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	select {
+	case resp := <-helloChan:
+		// 收到hello响应，检查UDP配置是否完整
+		if resp.UDP.Server == "" {
+			return false, "服务器未返回UDP server地址", mqttConnectMs
+		}
+		if resp.UDP.Port <= 0 || resp.UDP.Port > 65535 {
+			return false, fmt.Sprintf("服务器返回的UDP端口无效: %d", resp.UDP.Port), mqttConnectMs
+		}
+		// 测试UDP连接
+		udpOK, udpMsg, udpMs := testUDPConnection(resp.UDP)
+		totalMs := mqttConnectMs + udpMs
+		if udpOK {
+			return true, fmt.Sprintf("MQTT(%dms)与UDP(%dms)均正常", mqttConnectMs, udpMs), totalMs
+		} else {
+			return false, "MQTT正常但UDP失败: " + udpMsg, totalMs
+		}
+	case err := <-errChan:
+		return false, err.Error(), mqttConnectMs
+	case <-ctx.Done():
+		return false, fmt.Sprintf("等待hello响应超时(5s)，已发送hello到 %s", mqttConfig.PublishTopic), mqttConnectMs
+	}
+}
+
+// testUDPConnection 测试UDP连接
+func testUDPConnection(udpConfig UDPConfig) (bool, string, int64) {
+	t0 := time.Now()
+
+	// 验证UDP配置
+	if udpConfig.Server == "" {
+		return false, "UDP server地址为空", 0
+	}
+	if udpConfig.Port <= 0 || udpConfig.Port > 65535 {
+		return false, fmt.Sprintf("UDP端口无效: %d", udpConfig.Port), 0
+	}
+
+	// 解析UDP地址
+	udpAddr := fmt.Sprintf("%s:%d", udpConfig.Server, udpConfig.Port)
+	addr, err := net.ResolveUDPAddr("udp", udpAddr)
+	if err != nil {
+		return false, "解析UDP地址失败 (" + udpAddr + "): " + err.Error(), 0
+	}
+
+	// 创建UDP连接
+	conn, err := net.DialUDP("udp", nil, addr)
+	if err != nil {
+		if strings.Contains(err.Error(), "connection refused") {
+			return false, fmt.Sprintf("UDP服务器拒绝连接 (%s)，请检查UDP服务器是否启动", udpAddr), time.Since(t0).Milliseconds()
+		} else if strings.Contains(err.Error(), "no route to host") || strings.Contains(err.Error(), "network is unreachable") {
+			return false, fmt.Sprintf("无法路由到UDP服务器 (%s)，请检查网络连接", udpAddr), time.Since(t0).Milliseconds()
+		} else if strings.Contains(err.Error(), "timeout") {
+			return false, fmt.Sprintf("UDP连接超时 (%s)，请检查防火墙设置", udpAddr), time.Since(t0).Milliseconds()
+		}
+		return false, "UDP连接失败 (" + udpAddr + "): " + err.Error(), time.Since(t0).Milliseconds()
+	}
+	defer conn.Close()
+
+	// 设置读写超时
+	deadline := time.Now().Add(2 * time.Second)
+	err = conn.SetReadDeadline(deadline)
+	if err != nil {
+		return false, "设置UDP超时失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	// 发送测试数据包（模拟音频数据）
+	testData := []byte("ping")
+	_, err = conn.Write(testData)
+	if err != nil {
+		return false, "UDP发送数据失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	// 尝试读取响应（超时返回也认为连接成功，因为UDP可能不返回响应）
+	buf := make([]byte, 1024)
+	_, err = conn.Read(buf)
+	if err != nil {
+		// UDP读取超时也算成功，因为已经证明连接可以发送数据
+		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
+			return true, "UDP连接正常（无响应，超时）", time.Since(t0).Milliseconds()
+		}
+		return false, "UDP读取失败: " + err.Error(), time.Since(t0).Milliseconds()
+	}
+
+	return true, "UDP连接正常", time.Since(t0).Milliseconds()
+}
+
+// testOTAConfig 两段式检查：1）POST OTA 地址取 JSON 中的 websocket.url；2）对 WebSocket URL 建连验证。
+// 返回 ok, message, first_packet_ms, ota_response（OTA 接口响应 body，便于前端展示）
+func (ac *AdminController) testOTAConfig(cfg models.Config) (ok bool, message string, firstPacketMs int64, otaResponseBody string) {
+	if cfg.JsonData == "" {
+		return false, "配置为空", 0, ""
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(cfg.JsonData), &data); err != nil {
+		return false, "配置解析失败", 0, ""
+	}
+	var wsURLFromConfig string
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			if u, _ := ws["url"].(string); u != "" {
+				wsURLFromConfig = u
+			}
+		}
+	}
+	if wsURLFromConfig == "" {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				if u, _ := ws["url"].(string); u != "" {
+					wsURLFromConfig = u
+				}
+			}
+		}
+	}
+	if wsURLFromConfig == "" {
+		return false, "未配置 WebSocket URL", 0, ""
+	}
+	parsed, err := url.Parse(wsURLFromConfig)
+	if err != nil {
+		return false, "URL 解析失败", 0, ""
+	}
+	scheme := "http"
+	if parsed.Scheme == "wss" {
+		scheme = "https"
+	}
+	otaHTTPURL := scheme + "://" + parsed.Host + otaHTTPPath
+
+	t0 := time.Now()
+	// Part1: POST OTA 地址，带 Device-ID、Client-ID，解析 JSON 取 websocket.url
+	req, err := http.NewRequest(http.MethodPost, otaHTTPURL, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		return false, "创建 OTA 请求失败", time.Since(t0).Milliseconds(), ""
+	}
+	req.Header.Set("Device-ID", otaTestDeviceID)
+	req.Header.Set("Client-ID", otaTestClientID)
+	req.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		return false, "OTA 请求失败: " + err.Error(), time.Since(t0).Milliseconds(), ""
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	firstPacketMs = time.Since(t0).Milliseconds()
+	otaResponseBody = string(body)
+	if resp.StatusCode != http.StatusOK {
+		return false, "OTA 返回 HTTP " + strconv.Itoa(resp.StatusCode), firstPacketMs, otaResponseBody
+	}
+	var otaResp map[string]interface{}
+	if err := json.Unmarshal(body, &otaResp); err != nil {
+		return false, "OTA 响应非 JSON", firstPacketMs, otaResponseBody
+	}
+	wsObj, _ := otaResp["websocket"].(map[string]interface{})
+	if wsObj == nil {
+		return false, "OTA 响应中无 websocket 字段", firstPacketMs, otaResponseBody
+	}
+	wsURL, _ := wsObj["url"].(string)
+	if wsURL == "" {
+		return false, "OTA 响应中无 websocket.url", firstPacketMs, otaResponseBody
+	}
+
+	// Part2: WebSocket 建连，带 Device-ID、Client-ID，连通即关闭（建连耗时计入首包）
+	wsT0 := time.Now()
+	header := http.Header{}
+	header.Set("Device-ID", otaTestDeviceID)
+	header.Set("Client-ID", otaTestClientID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		return false, "WebSocket 连接失败: " + err.Error(), firstPacketMs + time.Since(wsT0).Milliseconds(), otaResponseBody
+	}
+	conn.Close()
+	wsTotalMs := firstPacketMs + time.Since(wsT0).Milliseconds()
+	return true, "OTA 与 WebSocket 均正常", wsTotalMs, otaResponseBody
+}
+
+// testOTAConfigWithMQTTUDP 扩展的OTA测试，支持WebSocket和MQTT UDP双测试
+// 返回完整的测试结果结构
+func (ac *AdminController) testOTAConfigWithMQTTUDP(cfg models.Config) OTATestResult {
+	result := OTATestResult{
+		WebSocket: OTATestItem{Ok: false, Message: "测试失败", FirstPacketMs: 0},
+	}
+
+	// 解析配置
+	if cfg.JsonData == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "配置为空", FirstPacketMs: 0}
+		return result
+	}
+	var data map[string]interface{}
+	if err := json.Unmarshal([]byte(cfg.JsonData), &data); err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "配置解析失败", FirstPacketMs: 0}
+		return result
+	}
+
+	// 获取WebSocket URL（优先external，为空则尝试test）
+	wsURLFromConfig := ""
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			wsURLFromConfig, _ = ws["url"].(string)
+		}
+	}
+	if wsURLFromConfig == "" {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				wsURLFromConfig, _ = ws["url"].(string)
+			}
+		}
+	}
+	if wsURLFromConfig == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "未配置 WebSocket URL", FirstPacketMs: 0}
+		return result
+	}
+
+	// 确定使用哪个环境的配置（根据WebSocket URL来源）
+	var envConfig map[string]interface{}
+	if ext, _ := data["external"].(map[string]interface{}); ext != nil {
+		if ws, _ := ext["websocket"].(map[string]interface{}); ws != nil {
+			if url, _ := ws["url"].(string); url == wsURLFromConfig && url != "" {
+				envConfig = ext
+			}
+		}
+	}
+	if envConfig == nil {
+		if test, _ := data["test"].(map[string]interface{}); test != nil {
+			if ws, _ := test["websocket"].(map[string]interface{}); ws != nil {
+				if url, _ := ws["url"].(string); url == wsURLFromConfig {
+					envConfig = test
+				}
+			}
+		}
+	}
+
+	// 检查是否启用MQTT UDP测试
+	var mqttEnabled bool
+	if envConfig != nil {
+		if mqtt, _ := envConfig["mqtt"].(map[string]interface{}); mqtt != nil {
+			if enable, ok := mqtt["enable"].(bool); ok && enable {
+				mqttEnabled = true
+			}
+		}
+	}
+
+	// 构建OTA HTTP URL
+	parsed, err := url.Parse(wsURLFromConfig)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "URL 解析失败", FirstPacketMs: 0}
+		return result
+	}
+	scheme := "http"
+	if parsed.Scheme == "wss" {
+		scheme = "https"
+	}
+	otaHTTPURL := scheme + "://" + parsed.Host + otaHTTPPath
+
+	// 第一阶段：POST OTA HTTP接口
+	t0 := time.Now()
+	req, err := http.NewRequest(http.MethodPost, otaHTTPURL, bytes.NewBuffer([]byte("{}")))
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "创建 OTA 请求失败", FirstPacketMs: time.Since(t0).Milliseconds()}
+		return result
+	}
+	req.Header.Set("Device-ID", otaTestDeviceID)
+	req.Header.Set("Client-ID", otaTestClientID)
+	req.Header.Set("Content-Type", "application/json")
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	resp, err := httpClient.Do(req)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 请求失败: " + err.Error(), FirstPacketMs: time.Since(t0).Milliseconds()}
+		return result
+	}
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+	httpMs := time.Since(t0).Milliseconds()
+
+	if resp.StatusCode != http.StatusOK {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 返回 HTTP " + strconv.Itoa(resp.StatusCode), FirstPacketMs: httpMs}
+		return result
+	}
+
+	var otaResp map[string]interface{}
+	if err := json.Unmarshal(body, &otaResp); err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应非 JSON", FirstPacketMs: httpMs}
+		return result
+	}
+
+	// 第二阶段：WebSocket测试
+	wsObj, _ := otaResp["websocket"].(map[string]interface{})
+	if wsObj == nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应中无 websocket 字段", FirstPacketMs: httpMs}
+		return result
+	}
+	wsURL, _ := wsObj["url"].(string)
+	if wsURL == "" {
+		result.WebSocket = OTATestItem{Ok: false, Message: "OTA 响应中无 websocket.url", FirstPacketMs: httpMs}
+		return result
+	}
+
+	wsT0 := time.Now()
+	header := http.Header{}
+	header.Set("Device-ID", otaTestDeviceID)
+	header.Set("Client-ID", otaTestClientID)
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	conn, _, err := websocket.DefaultDialer.DialContext(ctx, wsURL, header)
+	if err != nil {
+		result.WebSocket = OTATestItem{Ok: false, Message: "WebSocket 连接失败: " + err.Error(), FirstPacketMs: httpMs + time.Since(wsT0).Milliseconds()}
+		return result
+	}
+	conn.Close()
+	wsTotalMs := httpMs + time.Since(wsT0).Milliseconds()
+	result.WebSocket = OTATestItem{Ok: true, Message: "WebSocket 连接正常", FirstPacketMs: wsTotalMs}
+
+	// 保存OTA响应体（用于前端显示）
+	result.OTAResponse = string(body)
+
+	// 第三阶段：MQTT UDP测试（如果启用）
+	// 参考 test/mqtt_udp 逻辑：从OTA响应获取MQTT配置，发送hello，等待响应，测试UDP
+	if mqttEnabled {
+		// 从OTA响应中获取MQTT配置
+		mqttObj, hasMQTT := otaResp["mqtt"].(map[string]interface{})
+		if !hasMQTT {
+			result.MQTTUDP = &OTATestItem{
+				Ok:            false,
+				Message:       "OTA响应未返回MQTT配置，无法测试MQTT UDP",
+				FirstPacketMs: 0,
+			}
+			return result
+		}
+
+		// 解析MQTT配置字段
+		endpoint, _ := mqttObj["endpoint"].(string)
+		clientID, _ := mqttObj["client_id"].(string)
+		username, _ := mqttObj["username"].(string)
+		password, _ := mqttObj["password"].(string)
+		publishTopic, _ := mqttObj["publish_topic"].(string)
+		subscribeTopic, _ := mqttObj["subscribe_topic"].(string)
+
+		// 验证必要字段（不需要校验 subscribe_topic）
+		if endpoint == "" {
+			result.MQTTUDP = &OTATestItem{Ok: false, Message: "OTA响应中MQTT endpoint为空", FirstPacketMs: 0}
+			return result
+		}
+		if publishTopic == "" {
+			result.MQTTUDP = &OTATestItem{Ok: false, Message: "OTA响应中MQTT publish_topic为空", FirstPacketMs: 0}
+			return result
+		}
+
+		// 构建MQTT测试配置
+		otaMqttConfig := &MQTTUDPTestConfig{
+			Endpoint:       endpoint,
+			ClientID:       clientID,
+			Username:       username,
+			Password:       password,
+			PublishTopic:   publishTopic,
+			SubscribeTopic: subscribeTopic, // 保留但不校验，可能用于日志
+		}
+
+		mqttOK, mqttMsg, mqttMs := testMQTTUDPConfig(*otaMqttConfig)
+		result.MQTTUDP = &OTATestItem{
+			Ok:            mqttOK,
+			Message:       mqttMsg,
+			FirstPacketMs: mqttMs,
+		}
+	}
+
+	return result
+}
+
+// generateMQTTUsername 生成MQTT用户名
+func generateMQTTUsername(deviceID, signatureKey string) string {
+	h := hmac.New(sha256.New, []byte(signatureKey))
+	h.Write([]byte(deviceID + "-username"))
+	return hex.EncodeToString(h.Sum(nil))
+}
+
+// generateMQTTPassword 生成MQTT密码
+func generateMQTTPassword(deviceID, signatureKey string) string {
+	h := hmac.New(sha256.New, []byte(signatureKey))
+	h.Write([]byte(deviceID + "-password"))
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 // GetConfigs 获取所有配置列表
@@ -724,6 +1664,7 @@ func (ac *AdminController) CreateConfig(c *gin.Context) {
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusCreated, gin.H{"data": config})
 }
 
@@ -759,6 +1700,7 @@ func (ac *AdminController) UpdateConfig(c *gin.Context) {
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"data": config})
 }
 
@@ -768,6 +1710,7 @@ func (ac *AdminController) DeleteConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除配置失败"})
 		return
 	}
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
@@ -791,6 +1734,7 @@ func (ac *AdminController) SetDefaultConfig(c *gin.Context) {
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "设置默认配置成功", "data": config})
 }
 
@@ -1602,6 +2546,7 @@ func (ac *AdminController) UpdateVisionBaseConfig(c *gin.Context) {
 		}
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "Vision base config updated successfully"})
 }
 
@@ -1760,6 +2705,7 @@ func (ac *AdminController) ToggleConfigEnable(c *gin.Context) {
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	status := "禁用"
 	if config.Enabled {
 		status = "启用"
@@ -1791,7 +2737,18 @@ func (ac *AdminController) createConfigWithType(c *gin.Context, config *models.C
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusCreated, gin.H{"data": *config})
+}
+
+// configUpdateBody 用于 updateConfigWithType，json_data 兼容前端传 string 或 object
+type configUpdateBody struct {
+	Name      string      `json:"name"`
+	ConfigID  string      `json:"config_id"`
+	Provider  string      `json:"provider"`
+	JsonData  interface{} `json:"json_data"`
+	Enabled   bool        `json:"enabled"`
+	IsDefault bool        `json:"is_default"`
 }
 
 func (ac *AdminController) updateConfigWithType(c *gin.Context, configType string) {
@@ -1803,7 +2760,7 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 		return
 	}
 
-	var updateData models.Config
+	var updateData configUpdateBody
 	if err := c.ShouldBindJSON(&updateData); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
@@ -1817,9 +2774,23 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 	// 更新配置
 	config.Name = updateData.Name
 	config.Provider = updateData.Provider
-	config.JsonData = updateData.JsonData
 	config.Enabled = updateData.Enabled
 	config.IsDefault = updateData.IsDefault
+
+	// json_data：兼容 string 或 object，避免前端传对象时绑定失败
+	switch v := updateData.JsonData.(type) {
+	case string:
+		config.JsonData = v
+	case nil:
+		// 未传则保持原值
+	default:
+		bytes, err := json.Marshal(v)
+		if err != nil {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "json_data 格式无效"})
+			return
+		}
+		config.JsonData = string(bytes)
+	}
 
 	// 如果提供了新的config_id，则更新它
 	if updateData.ConfigID != "" {
@@ -1827,10 +2798,11 @@ func (ac *AdminController) updateConfigWithType(c *gin.Context, configType strin
 	}
 
 	if err := ac.DB.Save(&config).Error; err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新配置失败: " + err.Error()})
 		return
 	}
 
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"data": config})
 }
 
@@ -1840,6 +2812,7 @@ func (ac *AdminController) deleteConfigWithType(c *gin.Context, configType strin
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除配置失败"})
 		return
 	}
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "删除成功"})
 }
 
@@ -2598,7 +3571,7 @@ func (ac *AdminController) CreateMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "创建MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusCreated, gin.H{"data": config})
 }
 
@@ -2627,7 +3600,7 @@ func (ac *AdminController) UpdateMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "更新MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"data": config})
 }
 
@@ -2644,7 +3617,7 @@ func (ac *AdminController) DeleteMCPConfig(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "删除MCP配置失败"})
 		return
 	}
-
+	ac.notifySystemConfigChanged()
 	c.JSON(http.StatusOK, gin.H{"message": "MCP配置删除成功"})
 }
 

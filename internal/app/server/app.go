@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sync"
 	"time"
 	"xiaozhi-esp32-server-golang/internal/app/mqtt_server"
 	"xiaozhi-esp32-server-golang/internal/app/server/chat"
@@ -13,6 +14,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/data/history"
 	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	config_types "xiaozhi-esp32-server-golang/internal/domain/config/types"
+	"xiaozhi-esp32-server-golang/internal/domain/mcp"
 	"xiaozhi-esp32-server-golang/internal/pool"
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
@@ -26,6 +28,7 @@ import (
 type App struct {
 	wsServer       *websocket.WebSocketServer
 	mqttUdpAdapter *mqtt_udp.MqttUdpAdapter
+	mqttUdpMu      sync.RWMutex
 
 	// ChatManager管理 - 使用concurrent map
 	chatManagers cmap.ConcurrentMap[string, *chat.ChatManager]
@@ -47,6 +50,7 @@ func NewApp() *App {
 
 func (a *App) Run() {
 	go a.wsServer.Start()
+	log.Infof("enter Run, mqtt_server.enable: %v", viper.GetBool("mqtt_server.enable"))
 	if viper.GetBool("mqtt_server.enable") {
 		go func() {
 			err := a.startMqttServer()
@@ -55,9 +59,11 @@ func (a *App) Run() {
 			}
 		}()
 	}
-	if a.mqttUdpAdapter != nil {
-		time.Sleep(1 * time.Second)
-		go a.mqttUdpAdapter.Start()
+	a.mqttUdpMu.RLock()
+	adapter := a.mqttUdpAdapter
+	a.mqttUdpMu.RUnlock()
+	if adapter != nil {
+		go adapter.Start() // 非阻塞，连接与重试在 adapter 内部后台执行
 	}
 
 	// 注册聊天相关的本地MCP工具
@@ -99,18 +105,24 @@ func (app *App) initEventHandle() {
 	log.Info("消息处理器已初始化")
 }
 
-func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
-	isEnableUdp := viper.GetBool("mqtt.enable")
-	if !isEnableUdp {
-		return nil, nil
+func (app *App) currentMqttConfig() *mqtt_udp.MqttConfig {
+	if !viper.GetBool("mqtt.enable") {
+		return nil
 	}
-	mqttConfig := mqtt_udp.MqttConfig{
+	return &mqtt_udp.MqttConfig{
 		Broker:   viper.GetString("mqtt.broker"),
 		Type:     viper.GetString("mqtt.type"),
 		Port:     viper.GetInt("mqtt.port"),
 		ClientID: viper.GetString("mqtt.client_id"),
 		Username: viper.GetString("mqtt.username"),
 		Password: viper.GetString("mqtt.password"),
+	}
+}
+
+func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
+	mqttConfig := app.currentMqttConfig()
+	if mqttConfig == nil {
+		return nil, nil
 	}
 
 	udpServer, err := app.newUdpServer()
@@ -119,7 +131,7 @@ func (app *App) newMqttUdpAdapter() (*mqtt_udp.MqttUdpAdapter, error) {
 	}
 
 	return mqtt_udp.NewMqttUdpAdapter(
-		&mqttConfig,
+		mqttConfig,
 		mqtt_udp.WithUdpServer(udpServer),
 		mqtt_udp.WithOnNewConnection(app.OnNewConnection),
 	), nil
@@ -146,6 +158,119 @@ func (app *App) newWebSocketServer() *websocket.WebSocketServer {
 
 func (app *App) startMqttServer() error {
 	return mqtt_server.StartMqttServer()
+}
+
+// ReloadMqttServer 热更 MQTT Server：先停，再根据 mqtt_server.enable 决定是否启动（未启用则仅停止不启动）
+func (app *App) ReloadMqttServer() {
+	_ = mqtt_server.StopMqttServer()
+	if !viper.GetBool("mqtt_server.enable") {
+		return
+	}
+	if err := app.startMqttServer(); err != nil {
+		log.Errorf("ReloadMqttServer start: %v", err)
+	}
+}
+
+// ReloadMqttUdp 热更 MQTT+UDP：先停旧适配器，再根据 mqtt.enable 决定是否新建并启动（未启用则仅停止不启动）
+func (app *App) ReloadMqttUdp() {
+	app.mqttUdpMu.Lock()
+	old := app.mqttUdpAdapter
+	app.mqttUdpAdapter = nil
+	app.mqttUdpMu.Unlock()
+	if old != nil {
+		old.Stop()
+	}
+	if !viper.GetBool("mqtt.enable") {
+		return
+	}
+	adapter, err := app.newMqttUdpAdapter()
+	if err != nil {
+		log.Errorf("ReloadMqttUdp newMqttUdpAdapter: %v", err)
+		return
+	}
+	app.mqttUdpMu.Lock()
+	app.mqttUdpAdapter = adapter
+	app.mqttUdpMu.Unlock()
+	time.Sleep(500 * time.Millisecond)
+	go adapter.Start()
+}
+
+// ReloadMqttUdpWithFlags 根据变更标记决定是否热更 MQTT+UDP
+func (app *App) ReloadMqttUdpWithFlags(doMqttReload, doUdpReload bool) {
+	if !doMqttReload && !doUdpReload {
+		return
+	}
+	if !viper.GetBool("mqtt.enable") {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt disabled, stopping mqtt+udp")
+		app.ReloadMqttUdp()
+		return
+	}
+
+	app.mqttUdpMu.RLock()
+	adapter := app.mqttUdpAdapter
+	app.mqttUdpMu.RUnlock()
+
+	if adapter == nil {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt enabled but adapter is nil, starting mqtt+udp")
+		newAdapter, err := app.newMqttUdpAdapter()
+		if err != nil {
+			log.Errorf("ReloadMqttUdpWithFlags newMqttUdpAdapter: %v", err)
+			return
+		}
+		if newAdapter == nil {
+			return
+		}
+		app.mqttUdpMu.Lock()
+		app.mqttUdpAdapter = newAdapter
+		app.mqttUdpMu.Unlock()
+		time.Sleep(500 * time.Millisecond)
+		go newAdapter.Start()
+		return
+	}
+
+	if doMqttReload && doUdpReload {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt & udp config changed, reloading mqtt+udp")
+		app.ReloadMqttUdp()
+		return
+	}
+	if doMqttReload {
+		log.Infof("ReloadMqttUdpWithFlags: mqtt config changed, reloading mqtt only")
+		mqttConfig := app.currentMqttConfig()
+		if mqttConfig == nil {
+			app.ReloadMqttUdp()
+			return
+		}
+		adapter.ReloadMqttClient(mqttConfig)
+		return
+	}
+	if doUdpReload {
+		log.Infof("ReloadMqttUdpWithFlags: udp listen changed, reloading udp only")
+		udpServer, err := app.newUdpServer()
+		if err != nil {
+			log.Errorf("ReloadMqttUdpWithFlags newUdpServer: %v", err)
+			return
+		}
+		adapter.ReloadUdpServer(udpServer)
+	}
+}
+
+// ReloadMCP 热更 MCP：禁用时仅停止全局 MCP；启用时已启动则重启全局 MCP，未启动则启动 MCP 集群
+func (app *App) ReloadMCP() {
+	if !viper.GetBool("mcp.global.enabled") {
+		// 禁用：只停不启，避免依赖 Start() 内判断或合并时序
+		mcp.GetGlobalMCPManager().Stop()
+		return
+	}
+	mgr := mcp.GetMCPManager()
+	if mgr.IsStarted() {
+		if err := mgr.RestartManager("global"); err != nil {
+			log.Errorf("ReloadMCP RestartManager(global): %v", err)
+		}
+		return
+	}
+	if err := mcp.StartMCPManagers(); err != nil {
+		log.Errorf("ReloadMCP StartMCPManagers: %v", err)
+	}
 }
 
 // 所有协议新连接都走这里

@@ -1,6 +1,8 @@
 module xiaozhi-esp32-server-golang
 
-go 1.24.4
+go 1.24.2
+
+toolchain go1.24.11
 
 require (
 	github.com/ThinkInAIXYZ/go-mcp v0.2.19
@@ -12,7 +14,7 @@ require (
 	github.com/cloudwego/eino-ext/components/model/ollama v0.0.0-20250530094010-bd1c4fc20bbe
 	github.com/cloudwego/eino-ext/components/model/openai v0.0.0-20250530094010-bd1c4fc20bbe
 	github.com/difyz9/edge-tts-go v0.0.2
-	github.com/eclipse/paho.mqtt.golang v1.5.0
+	github.com/eclipse/paho.mqtt.golang v1.5.1
 	github.com/getkin/kin-openapi v0.118.0
 	github.com/gin-gonic/gin v1.10.1
 	github.com/go-audio/audio v1.0.0
@@ -27,10 +29,10 @@ require (
 	github.com/lestrrat-go/file-rotatelogs v2.4.0+incompatible
 	github.com/mark3labs/mcp-go v0.36.0
 	github.com/memodb-io/memobase/src/client/memobase-go v0.0.0-20251008012534-936f45328453
+	github.com/mitchellh/hashstructure/v2 v2.0.2
 	github.com/mochi-mqtt/server/v2 v2.7.9
 	github.com/orcaman/concurrent-map/v2 v2.0.1
 	github.com/redis/go-redis/v9 v9.7.3
-	github.com/scroot/music-sd v0.0.1
 	github.com/sirupsen/logrus v1.9.3
 	github.com/spf13/viper v1.20.1
 	github.com/streamer45/silero-vad-go v0.2.1

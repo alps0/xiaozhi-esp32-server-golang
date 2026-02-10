@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"sync"
 	"time"
 
@@ -62,9 +63,15 @@ type WebSocketResponse struct {
 }
 
 var (
-	defaultClient *WebSocketClient
-	clientOnce    sync.Once
+	defaultClient           *WebSocketClient
+	clientOnce              sync.Once
+	systemConfigPushHandler func(map[string]interface{})
 )
+
+// SetSystemConfigPushHandler 设置收到 system_config 推送时的回调（主程序用于合并到 viper 等），由 user_config 在 Init 时注入
+func SetSystemConfigPushHandler(fn func(map[string]interface{})) {
+	systemConfigPushHandler = fn
+}
 
 func GetDefaultClient() *WebSocketClient {
 	clientOnce.Do(func() {
@@ -592,6 +599,15 @@ func (c *WebSocketClient) GetResponse(requestID string, timeout time.Duration) (
 	}
 }
 
+// handleSystemConfigPush 处理服务端推送的系统配置变更，异步调用已注册的回调
+func (c *WebSocketClient) handleSystemConfigPush(data map[string]interface{}) {
+	if systemConfigPushHandler == nil {
+		log.Debugf("收到 system_config 推送，但未注册处理回调")
+		return
+	}
+	go systemConfigPushHandler(data)
+}
+
 // handleMessages 处理接收到的WebSocket消息
 func (c *WebSocketClient) handleMessages() {
 	for {
@@ -621,8 +637,14 @@ func (c *WebSocketClient) handleMessages() {
 				continue
 			}
 
-			// 根据消息类型判断是请求还是响应
-			if method, exists := rawMessage["method"]; exists && method != nil {
+			// 根据消息类型判断：服务端推送(system_config)、请求、响应
+			if msgType, _ := rawMessage["type"].(string); msgType == "system_config" {
+				if data, ok := rawMessage["data"].(map[string]interface{}); ok {
+					c.handleSystemConfigPush(data)
+				} else {
+					log.Warnf("收到 system_config 推送但 data 格式无效")
+				}
+			} else if method, exists := rawMessage["method"]; exists && method != nil {
 				// 这是收到的请求
 				c.handleIncomingRequest(rawMessage)
 			} else if status, exists := rawMessage["status"]; exists && status != nil {
@@ -689,6 +711,10 @@ func (c *WebSocketClient) RegisterMessageHandler(ctx context.Context, path strin
 // handleDefaultRequest 默认请求处理器
 func (c *WebSocketClient) handleDefaultRequest(request *WebSocketRequest) {
 	switch request.Path {
+	case "/api/config/test":
+		// 配置测试可能较耗时（VAD/ASR/LLM/TTS 串行执行），放入独立 goroutine 避免阻塞读循环，支持多请求并发
+		go c.handleConfigTestRequest(request)
+
 	case "/api/mcp/tools":
 		// 处理MCP工具列表请求
 		c.handleMcpToolListRequest(request)
@@ -745,6 +771,90 @@ func (c *WebSocketClient) handleDefaultRequest(request *WebSocketRequest) {
 			}
 		}
 	}
+}
+
+// configTestTotalTimeout 配置测试整体超时（VAD+ASR+LLM+TTS 合计）
+const configTestTotalTimeout = 90 * time.Second
+
+// handleConfigTestRequest 处理配置测试请求：VAD/ASR/LLM/TTS 使用下发的配置与固定 WAV/文本执行轻量测试
+func (c *WebSocketClient) handleConfigTestRequest(request *WebSocketRequest) {
+	data, _ := request.Body["data"].(map[string]interface{})
+	if data == nil {
+		log.Debugf("[config_test] 请求 ID=%s 缺少 data 字段", request.ID)
+		_ = c.SendResponse(request.ID, 400, nil, "缺少 data 字段")
+		return
+	}
+	testText, _ := request.Body["test_text"].(string)
+	// debug: 请求中各类型配置数量（不含 provider）
+	log.Debugf("[config_test] 请求 ID=%s test_text=%q data 各类型条目数: vad=%d asr=%d llm=%d tts=%d",
+		request.ID, testText,
+		countConfigKeys(data["vad"]), countConfigKeys(data["asr"]),
+		countConfigKeys(data["llm"]), countConfigKeys(data["tts"]))
+
+	type configTestResult struct {
+		vad, asr, llm, tts map[string]interface{}
+	}
+	done := make(chan configTestResult, 1)
+	go func() {
+		vadR, asrR, llmR, ttsR := RunConfigTest(data, testText)
+		done <- configTestResult{vadR, asrR, llmR, ttsR}
+	}()
+
+	var vadR, asrR, llmR, ttsR map[string]interface{}
+	select {
+	case res := <-done:
+		vadR, asrR, llmR, ttsR = res.vad, res.asr, res.llm, res.tts
+	case <-time.After(configTestTotalTimeout):
+		log.Warnf("[config_test] 请求 ID=%s 整体超时 %v", request.ID, configTestTotalTimeout)
+		body := map[string]interface{}{
+			"vad": map[string]interface{}{"_error": map[string]interface{}{"ok": false, "message": "配置测试总超时"}},
+			"asr": map[string]interface{}{"_error": map[string]interface{}{"ok": false, "message": "配置测试总超时"}},
+			"llm": map[string]interface{}{"_error": map[string]interface{}{"ok": false, "message": "配置测试总超时"}},
+			"tts": map[string]interface{}{"_error": map[string]interface{}{"ok": false, "message": "配置测试总超时"}},
+		}
+		_ = c.SendResponse(request.ID, 200, body, "")
+		return
+	}
+
+	// 请求中带了某类型但无任何可测配置时，返回 _none 便于前端展示原因
+	fillEmptyConfigTestResult(data, "vad", vadR)
+	fillEmptyConfigTestResult(data, "asr", asrR)
+	fillEmptyConfigTestResult(data, "llm", llmR)
+	fillEmptyConfigTestResult(data, "tts", ttsR)
+	body := map[string]interface{}{
+		"vad": vadR,
+		"asr": asrR,
+		"llm": llmR,
+		"tts": ttsR,
+	}
+	log.Debugf("[config_test] 响应 ID=%s 各类型结果数: vad=%d asr=%d llm=%d tts=%d",
+		request.ID, len(vadR), len(asrR), len(llmR), len(ttsR))
+	_ = c.SendResponse(request.ID, 200, body, "")
+}
+
+// fillEmptyConfigTestResult 当请求包含该类型但测试结果为空时，写入 _none 条目
+func fillEmptyConfigTestResult(data map[string]interface{}, typ string, result map[string]interface{}) {
+	if _, has := data[typ]; !has || len(result) > 0 {
+		return
+	}
+	msg := "未配置或未启用" + strings.ToUpper(typ)
+	result["_none"] = map[string]interface{}{"ok": false, "message": msg}
+	log.Debugf("[config_test] 类型 %s 无结果，已写入 _none: %s", typ, msg)
+}
+
+// countConfigKeys 统计 data 中除 provider 外的 config 条目数，用于 debug
+func countConfigKeys(v interface{}) int {
+	m, ok := v.(map[string]interface{})
+	if !ok {
+		return 0
+	}
+	n := 0
+	for k := range m {
+		if k != "provider" {
+			n++
+		}
+	}
+	return n
 }
 
 // handleIncomingResponse 处理收到的响应

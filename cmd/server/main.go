@@ -1,14 +1,17 @@
-package main
+﻿package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"net/http"
 	_ "net/http/pprof"
 	"os"
 	"os/signal"
+	"sync"
 	"syscall"
 	"xiaozhi-esp32-server-golang/internal/app/server"
+	user_config "xiaozhi-esp32-server-golang/internal/domain/config"
 	log "xiaozhi-esp32-server-golang/logger"
 
 	"github.com/spf13/viper"
@@ -16,10 +19,10 @@ import (
 
 func main() {
 	// 解析命令行参数
-	configFile := flag.String("c", "config/config.yaml", "配置文件路径")
-	managerEnable := flag.Bool("manager-enable", false, "是否启用内嵌 manager")
+	configFile := flag.String("c", defaultConfigFilePath, "配置文件路径")
+	managerEnable := flag.Bool("manager-enable", defaultManagerEnable, "是否启用内嵌 manager")
 	managerConfig := flag.String("manager-config", "", "manager 配置文件路径，启用时可选，默认 manager/backend/config/config.json")
-	asrEnable := flag.Bool("asr-enable", false, "是否启用内嵌 asr_server")
+	asrEnable := flag.Bool("asr-enable", defaultAsrEnable, "是否启用内嵌 asr_server")
 	asrConfig := flag.String("asr-config", "", "asr_server 配置文件路径，启用时可选，默认 asr_server/config.json")
 	flag.Parse()
 
@@ -40,22 +43,88 @@ func main() {
 		return
 	}
 
-	// 根据配置启动pprof服务
+	// 根据配置启动 pprof 服务
 	if viper.GetBool("server.pprof.enable") {
 		pprofPort := viper.GetInt("server.pprof.port")
 		go func() {
-			log.Infof("启动pprof服务，端口: %d", pprofPort)
+			log.Infof("启动 pprof 服务，端口: %d", pprofPort)
 			if err := http.ListenAndServe(fmt.Sprintf(":%d", pprofPort), nil); err != nil {
-				log.Errorf("pprof服务启动失败: %v", err)
+				log.Errorf("pprof 服务启动失败: %v", err)
 			}
 		}()
-		log.Infof("pprof地址: http://localhost:%d/debug/pprof/", pprofPort)
+		log.Infof("pprof 地址: http://localhost:%d/debug/pprof/", pprofPort)
 	} else {
-		log.Info("pprof服务已禁用")
+		log.Info("pprof 服务已禁用")
 	}
 
 	// 创建服务器
 	appInstance := server.NewApp()
+
+	var lock sync.RWMutex
+	// 注册 system_config 热更：用 viper 当前配置与推送配置对比，仅当内容变更时合并并触发热更
+	user_config.RegisterManagerSystemConfigHandler(func(data map[string]interface{}) {
+		lock.Lock()
+		defer lock.Unlock()
+		current := viper.AllSettings()
+		oldMqttServer := current["mqtt_server"]
+		oldMqtt := current["mqtt"]
+		oldUdp := current["udp"]
+		oldMcp := current["mcp"]
+		oldLocalMcp := current["local_mcp"]
+
+		var doMqttServer, doMqttReload, doUdpReload, doMcpReload bool
+		if data["mqtt_server"] != nil {
+			if !SystemConfigEqual(data["mqtt_server"], oldMqttServer) {
+				doMqttServer = true
+			}
+		}
+		if data["mqtt"] != nil {
+			if !SystemConfigEqual(data["mqtt"], oldMqtt) {
+				doMqttReload = true
+			}
+		}
+		if data["udp"] != nil {
+			if udpListenChanged(data["udp"], oldUdp) {
+				doUdpReload = true
+			}
+		}
+		if data["mcp"] != nil {
+			if !SystemConfigEqual(data["mcp"], oldMcp) {
+				doMcpReload = true
+			}
+		}
+		if data["local_mcp"] != nil {
+			if !SystemConfigEqual(data["local_mcp"], oldLocalMcp) {
+				doMcpReload = true
+			}
+		}
+
+		ApplySystemConfigToViper(data)
+
+		var wg sync.WaitGroup
+		if doMqttServer {
+			go func() {
+				wg.Add(1)
+				defer wg.Done()
+				appInstance.ReloadMqttServer()
+			}()
+		}
+		if doMqttReload || doUdpReload {
+			go func() {
+				wg.Add(1)
+				defer wg.Done()
+				appInstance.ReloadMqttUdpWithFlags(doMqttReload, doUdpReload)
+			}()
+		}
+		if doMcpReload {
+			go func() {
+				wg.Add(1)
+				defer wg.Done()
+				appInstance.ReloadMCP()
+			}()
+		}
+		wg.Wait()
+	})
 	appInstance.Run()
 
 	// 阻塞监听退出信号
@@ -77,4 +146,32 @@ func main() {
 	}
 
 	log.Info("服务器已关闭")
+}
+
+func udpListenChanged(newUdpCfg interface{}, oldUdpCfg interface{}) bool {
+	newListenHost, newListenPort := udpListenHostPort(newUdpCfg)
+	oldListenHost, oldListenPort := udpListenHostPort(oldUdpCfg)
+	if newListenHost == "" && newListenPort == 0 {
+		return false
+	}
+	return newListenHost != oldListenHost || newListenPort != oldListenPort
+}
+
+func udpListenHostPort(cfg interface{}) (string, int) {
+	if cfg == nil {
+		return "", 0
+	}
+	type udpListen struct {
+		ListenHost string `json:"listen_host"`
+		ListenPort int    `json:"listen_port"`
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		return "", 0
+	}
+	var parsed udpListen
+	if err := json.Unmarshal(raw, &parsed); err != nil {
+		return "", 0
+	}
+	return parsed.ListenHost, parsed.ListenPort
 }

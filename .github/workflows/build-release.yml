@@ -1,6 +1,4 @@
-# 基于 opus 环境的 Go 多平台编译 + Release
-# 含 frontend（embed_ui）、manager/backend、asr_server（子模块）；需 opus + ten_vad + sherpa-onnx 运行时
-name: Build Go binaries
+﻿name: Build Go binaries
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -12,9 +10,6 @@ on:
     tags: ["v*"]
   workflow_dispatch:
 
-env:
-  OPUS_VERSION: "1.3.1"
-
 permissions:
   contents: write
 
@@ -22,103 +17,100 @@ jobs:
   build-windows-amd64:
     runs-on: ubuntu-latest
     steps:
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME//\//-}" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Set up Go
-        uses: actions/setup-go@v5
-        with:
-          go-version: "1.24.4"
-
-      - name: Set up Node (frontend)
-        uses: actions/setup-node@v4
-        with:
-          node-version: "20"
-          cache: "npm"
-          cache-dependency-path: manager/frontend/package-lock.json
-
-      - name: Build frontend (embed_ui)
+      - name: Verify asr_server submodule
         run: |
-          cd manager/frontend && npm ci && npm run build
-          mkdir -p ../backend/static/dist
-          cp -r dist/* ../backend/static/dist/
-
-      - name: Install cross-compilation tools & build libopus (static)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y mingw-w64 pkg-config build-essential wget upx-ucl
-          wget -q "https://archive.mozilla.org/pub/opus/opus-${OPUS_VERSION}.tar.gz"
-          tar xf "opus-${OPUS_VERSION}.tar.gz"
-          pushd "opus-${OPUS_VERSION}"
-          ./configure \
-            --host=x86_64-w64-mingw32 \
-            --disable-shared --enable-static \
-            --disable-doc --disable-extra-programs \
-            --prefix="$HOME/opus-win"
-          make -j"$(nproc)"
-          make install
-          popd
-
-      - name: Configure env for Windows build
-        run: |
-          echo "PKG_CONFIG_PATH=$HOME/opus-win/lib/pkgconfig" >> $GITHUB_ENV
-          echo "CGO_ENABLED=1" >> $GITHUB_ENV
-          echo "GOOS=windows" >> $GITHUB_ENV
-          echo "GOARCH=amd64" >> $GITHUB_ENV
-          echo "CC=x86_64-w64-mingw32-gcc" >> $GITHUB_ENV
-
-      - name: Build Windows binary
-        run: |
-          go mod tidy
-          # ten_vad 为动态库，不加 -static
-          go build -v -tags "nolibopusfile asr_server manager embed_ui" \
-            -ldflags "-s -w" \
-            -o xiaozhi_server.exe ./cmd/server
-
-      - name: Compress with UPX & keep single exe
-        run: |
-          upx --lzma xiaozhi_server.exe || true
-
-      - name: Set version for package name
-        id: version
-        run: |
-          if [[ "${{ github.ref }}" == refs/tags/* ]]; then
-            echo "version=${{ github.ref_name }}" >> $GITHUB_OUTPUT
-          else
-            echo "version=snapshot" >> $GITHUB_OUTPUT
+          if [ ! -f asr_server/server/setup.go ]; then
+            echo "::error::asr_server 子模块未拉取，binary 构建需要 voice_server" 
+            ls -la asr_server 2>/dev/null || true
+            exit 1
           fi
 
-      - name: Pack Windows release (exe + build/common + build/windows)
+      - name: Build Windows package with Docker
         run: |
-          VERSION="${{ steps.version.outputs.version }}"
-          PACK_DIR="xiaozhi_server_windows_amd64_${VERSION}"
-          mkdir -p "$PACK_DIR"/data "$PACK_DIR"/logs
-
-          cp xiaozhi_server.exe "$PACK_DIR/"
-          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/"
-          cp -r build/common/models "$PACK_DIR/"
-          cp -r build/common/data/* "$PACK_DIR/data/"
-          cp build/windows/start.bat build/windows/README.md "$PACK_DIR/"
-          cp build/windows/onnxruntime.dll build/windows/sherpa-onnx-c-api.dll build/windows/sherpa-onnx-cxx-api.dll build/windows/ten_vad.dll "$PACK_DIR/"
-
-          zip -r "${PACK_DIR}.zip" "$PACK_DIR"
-          echo "PACK_ZIP=${PACK_DIR}.zip" >> $GITHUB_ENV
+          docker build --target builder -f docker/Dockerfile.windows -t xiaozhi-build-windows .
+          docker create --name xiaozhi_windows xiaozhi-build-windows
+          docker cp xiaozhi_windows:/out ./out
+          docker rm xiaozhi_windows
+          rm -rf "out/xiaozhi_server-windows-amd64-${VERSION}"
+          mv out/windows-amd64 "out/xiaozhi_server-windows-amd64-${VERSION}"
 
       - name: Upload Windows package
         uses: actions/upload-artifact@v4
         with:
-          name: windows-amd64-binaries
-          path: ${{ env.PACK_ZIP }}
+          name: xiaozhi_server-windows-amd64-${{ env.VERSION }}
+          path: out/xiaozhi_server-windows-amd64-${{ env.VERSION }}
 
   build-linux-amd64:
     runs-on: ubuntu-latest
     steps:
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME//\//-}" >> $GITHUB_ENV
       - name: Checkout code
         uses: actions/checkout@v4
         with:
+          fetch-depth: 0
           submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify asr_server submodule
+        run: |
+          if [ ! -f asr_server/server/setup.go ]; then
+            echo "::error::asr_server 子模块未拉取，binary 构建需要 voice_server" 
+            ls -la asr_server 2>/dev/null || true
+            exit 1
+          fi
+
+      - name: Build Linux package with Docker
+        run: |
+          docker build --target builder -f docker/Dockerfile.linux -t xiaozhi-build-linux .
+          docker create --name xiaozhi_linux xiaozhi-build-linux
+          docker cp xiaozhi_linux:/out ./out
+          docker rm xiaozhi_linux
+          rm -rf "out/xiaozhi_server-linux-amd64-${VERSION}"
+          mv out/linux-amd64 "out/xiaozhi_server-linux-amd64-${VERSION}"
+
+      - name: Upload Linux package
+        uses: actions/upload-artifact@v4
+        with:
+          name: xiaozhi_server-linux-amd64-${{ env.VERSION }}
+          path: out/xiaozhi_server-linux-amd64-${{ env.VERSION }}
+
+  build-macos:
+    strategy:
+      matrix:
+        include:
+          - arch: amd64
+            runner: macos-15-intel
+          - arch: arm64
+            runner: macos-14
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME//\//-}" >> $GITHUB_ENV
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          submodules: recursive
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Verify asr_server submodule
+        run: |
+          if [ ! -f asr_server/server/setup.go ]; then
+            echo "::error::asr_server 子模块未拉取，binary 构建需要 voice_server"
+            ls -la asr_server 2>/dev/null || true
+            exit 1
+          fi
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -132,88 +124,127 @@ jobs:
           cache: "npm"
           cache-dependency-path: manager/frontend/package-lock.json
 
+      - name: Build libopus (static, macOS)
+        run: |
+          brew update
+          brew install pkg-config autoconf automake libtool
+          OPUS_VERSION="1.3.1"
+          curl -L "https://archive.mozilla.org/pub/opus/opus-${OPUS_VERSION}.tar.gz" -o /tmp/opus.tar.gz
+          tar -xzf /tmp/opus.tar.gz -C /tmp
+          pushd "/tmp/opus-${OPUS_VERSION}"
+          ./configure --enable-static --disable-shared --disable-doc --disable-extra-programs --prefix="$HOME/opus-macos"
+          make -j"$(sysctl -n hw.ncpu)"
+          make install
+          popd
+          echo "PKG_CONFIG_PATH=$HOME/opus-macos/lib/pkgconfig" >> $GITHUB_ENV
+
       - name: Build frontend (embed_ui)
         run: |
           cd manager/frontend && npm ci && npm run build
           mkdir -p ../backend/static/dist
           cp -r dist/* ../backend/static/dist/
 
-      - name: Install deps & build libopus (static)
+      - name: Download sherpa-onnx-go-macos libs
         run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config build-essential wget libc++-dev libc++abi-dev upx-ucl zip patchelf
-          wget -q "https://archive.mozilla.org/pub/opus/opus-${OPUS_VERSION}.tar.gz"
-          tar xf "opus-${OPUS_VERSION}.tar.gz"
-          pushd "opus-${OPUS_VERSION}"
-          ./configure --enable-static --disable-shared --disable-doc --disable-extra-programs --prefix="$HOME/opus-linux"
-          make -j"$(nproc)"
-          make install
-          popd
+          SHERPA_ONNX_GO_VERSION="$(grep -E 'github.com/k2-fsa/sherpa-onnx-go[[:space:]]+v' go.mod | head -n 1 | awk '{print $2}')"
+          if [ -z "$SHERPA_ONNX_GO_VERSION" ]; then
+            echo "sherpa-onnx-go version not found in go.mod" >&2
+            exit 1
+          fi
+          SHERPA_ONNX_GO_MACOS_VERSION="${SHERPA_ONNX_GO_VERSION#v}"
+          curl -L "https://github.com/k2-fsa/sherpa-onnx-go-macos/archive/refs/tags/v${SHERPA_ONNX_GO_MACOS_VERSION}.tar.gz" -o /tmp/sherpa-onnx-go-macos.tar.gz
+          tar -xzf /tmp/sherpa-onnx-go-macos.tar.gz -C /tmp
+          SHERPA_DIR="/tmp/sherpa-onnx-go-macos-${SHERPA_ONNX_GO_MACOS_VERSION}"
+          if [ "${{ matrix.arch }}" = "amd64" ]; then
+            SHERPA_LIB_DIR="${SHERPA_DIR}/lib/x86_64-apple-darwin"
+          else
+            SHERPA_LIB_DIR="${SHERPA_DIR}/lib/aarch64-apple-darwin"
+          fi
+          if [ ! -d "$SHERPA_LIB_DIR" ]; then
+            echo "sherpa-onnx lib dir not found: $SHERPA_LIB_DIR" >&2
+            exit 1
+          fi
+          echo "SHERPA_LIB_DIR=$SHERPA_LIB_DIR" >> $GITHUB_ENV
 
-      - name: Configure env for Linux build
-        run: |
-          echo "PKG_CONFIG_PATH=$HOME/opus-linux/lib/pkgconfig" >> $GITHUB_ENV
-          echo "CGO_ENABLED=1" >> $GITHUB_ENV
-          echo "CGO_LDFLAGS=-lm" >> $GITHUB_ENV
-          echo "GOOS=linux" >> $GITHUB_ENV
-          echo "GOARCH=amd64" >> $GITHUB_ENV
-
-      - name: Build Linux binary
+      - name: Build macOS binary
+        env:
+          GOOS: darwin
+          GOARCH: ${{ matrix.arch }}
+          CGO_ENABLED: "1"
         run: |
           go mod tidy
-          # ten_vad 为 .so 动态库，不加 -static；rpath 已在 cgo 中指定；含 asr_server 与 Windows 一致
           go build -v -tags "nolibopusfile asr_server manager embed_ui" \
             -ldflags "-s -w" \
-            -o xiaozhi_server_linux_amd64 ./cmd/server
+            -o xiaozhi_server ./cmd/server
 
-      - name: Compress with UPX (optional)
+      - name: Pack macOS release
         run: |
-          cp xiaozhi_server_linux_amd64 xiaozhi_server_linux_amd64-upx
-          upx --lzma xiaozhi_server_linux_amd64-upx || true
+          ARCH="${{ matrix.arch }}"
+          PACK_DIR="out/macos-${ARCH}/xiaozhi_server-macos-${ARCH}"
+          mkdir -p "$PACK_DIR/ten-vad/lib/macOS" "$PACK_DIR/logs"
 
-      - name: Pack Linux release (binary + build/common + build/linux .so)
-        run: |
-          mkdir -p release_linux_amd64/ten-vad/lib/Linux/x64
-          cp xiaozhi_server_linux_amd64 xiaozhi_server_linux_amd64-upx release_linux_amd64/
-          patchelf --add-rpath '$ORIGIN/ten-vad/lib/Linux/x64' release_linux_amd64/xiaozhi_server_linux_amd64 release_linux_amd64/xiaozhi_server_linux_amd64-upx 2>/dev/null || true
-          cp build/linux/libten_vad.so build/linux/libsherpa-onnx-c-api.so build/linux/libonnxruntime.so release_linux_amd64/ten-vad/lib/Linux/x64/
-          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json release_linux_amd64/
-          cp -r build/common/models build/common/data release_linux_amd64/
-          mkdir -p release_linux_amd64/logs
-          chmod +x release_linux_amd64/xiaozhi_server_linux_amd64*
-          zip -r linux-amd64.zip release_linux_amd64/
+          cp xiaozhi_server "$PACK_DIR/"
+          cp build/common/main_config.yaml build/common/manager.json build/common/asr_server.json "$PACK_DIR/"
+          cp doc/aio/README_macos.md "$PACK_DIR/README.md"
+          cp -r build/common/models build/common/data "$PACK_DIR/"
+          rm -f "$PACK_DIR/data/xiaozhi.db"
+          cp -R lib/ten-vad/lib/macOS/ten_vad.framework "$PACK_DIR/ten-vad/lib/macOS/"
+          # Copy all sherpa dylibs, including versioned files like libonnxruntime.1.17.1.dylib.
+          cp "$SHERPA_LIB_DIR"/*.dylib "$PACK_DIR/ten-vad/lib/macOS/"
+          chmod +x "$PACK_DIR/xiaozhi_server"
+          install_name_tool -add_rpath "@executable_path/ten-vad/lib/macOS" "$PACK_DIR/xiaozhi_server" || true
+          otool -L "$PACK_DIR/xiaozhi_server" | grep -E "libonnxruntime|libsherpa-onnx" || true
 
-      - name: Upload Linux binaries
+          rm -rf "out/xiaozhi_server-macos-${ARCH}-${VERSION}"
+          mv "out/macos-${ARCH}" "out/xiaozhi_server-macos-${ARCH}-${VERSION}"
+
+      - name: Upload macOS package
         uses: actions/upload-artifact@v4
         with:
-          name: linux-amd64-binaries
-          path: |
-            release_linux_amd64/xiaozhi_server_linux_amd64
-            release_linux_amd64/xiaozhi_server_linux_amd64-upx
-            linux-amd64.zip
+          name: xiaozhi_server-macos-${{ matrix.arch }}-${{ env.VERSION }}
+          path: out/xiaozhi_server-macos-${{ matrix.arch }}-${{ env.VERSION }}
 
   release:
     needs:
       - build-windows-amd64
       - build-linux-amd64
+      - build-macos
     if: startsWith(github.ref, 'refs/tags/')
     runs-on: ubuntu-latest
     steps:
+      - name: Set version
+        run: echo "VERSION=${GITHUB_REF_NAME//\//-}" >> $GITHUB_ENV
       - name: Download Windows package
         uses: actions/download-artifact@v4
         with:
-          name: windows-amd64-binaries
+          name: xiaozhi_server-windows-amd64-${{ env.VERSION }}
           path: release
 
-      - name: Download Linux binaries
+      - name: Download Linux package
         uses: actions/download-artifact@v4
         with:
-          name: linux-amd64-binaries
+          name: xiaozhi_server-linux-amd64-${{ env.VERSION }}
           path: release
 
-      - name: Prepare release assets
+      - name: Download macOS amd64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: xiaozhi_server-macos-amd64-${{ env.VERSION }}
+          path: release
+
+      - name: Download macOS arm64 package
+        uses: actions/download-artifact@v4
+        with:
+          name: xiaozhi_server-macos-arm64-${{ env.VERSION }}
+          path: release
+
+      - name: Pack release zip
         run: |
-          mv release/xiaozhi_server_windows_amd64_*.zip release/windows-amd64.zip
+          cd release
+          zip -r "xiaozhi_server-windows-amd64-${VERSION}.zip" "xiaozhi_server-windows-amd64-${VERSION}"
+          zip -r "xiaozhi_server-linux-amd64-${VERSION}.zip" "xiaozhi_server-linux-amd64-${VERSION}"
+          zip -r "xiaozhi_server-macos-amd64-${VERSION}.zip" "xiaozhi_server-macos-amd64-${VERSION}"
+          zip -r "xiaozhi_server-macos-arm64-${VERSION}.zip" "xiaozhi_server-macos-arm64-${VERSION}"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -223,9 +254,9 @@ jobs:
           draft: false
           prerelease: false
           files: |
-            release/windows-amd64.zip
-            release/release_linux_amd64/xiaozhi_server_linux_amd64
-            release/release_linux_amd64/xiaozhi_server_linux_amd64-upx
-            release/linux-amd64.zip
+            release/xiaozhi_server-windows-amd64-${{ env.VERSION }}.zip
+            release/xiaozhi_server-linux-amd64-${{ env.VERSION }}.zip
+            release/xiaozhi_server-macos-amd64-${{ env.VERSION }}.zip
+            release/xiaozhi_server-macos-arm64-${{ env.VERSION }}.zip
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

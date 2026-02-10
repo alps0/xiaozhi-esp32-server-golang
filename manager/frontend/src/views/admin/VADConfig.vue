@@ -5,6 +5,15 @@
         <h2>VAD配置管理</h2>
       </div>
       <div class="header-right">
+        <el-button
+          type="warning"
+          plain
+          :loading="testingAll"
+          @click="testAllConfigs"
+          :disabled="!getEnabledConfigs().length"
+        >
+          测试全部
+        </el-button>
         <el-button type="primary" @click="showDialog = true">
           <el-icon><Plus /></el-icon>
           添加配置
@@ -34,14 +43,35 @@
           />
         </template>
       </el-table-column>
+      <el-table-column label="测试结果" width="120" align="center">
+        <template #default="scope">
+          <template v-if="testResults[scope.row.config_id]">
+            <el-tooltip v-if="testResults[scope.row.config_id].ok" :content="formatTestResultTip(testResults[scope.row.config_id])" placement="top">
+              <span class="test-result test-ok">{{ formatTestResultLabel(testResults[scope.row.config_id]) }}</span>
+            </el-tooltip>
+            <el-tooltip v-else :content="testResults[scope.row.config_id].message" placement="top" :show-after="200">
+              <span class="test-result test-err">错误</span>
+            </el-tooltip>
+          </template>
+          <span v-else class="test-result test-none">-</span>
+        </template>
+      </el-table-column>
       <el-table-column prop="created_at" label="创建时间" width="180">
         <template #default="scope">
           {{ formatDate(scope.row.created_at) }}
         </template>
       </el-table-column>
-      <el-table-column label="操作" width="180">
+      <el-table-column label="操作" width="260">
         <template #default="scope">
           <el-button size="small" @click="editConfig(scope.row)">编辑</el-button>
+          <el-button
+            size="small"
+            type="warning"
+            :loading="testingId === scope.row.config_id"
+            @click="testConfig(scope.row, 'vad')"
+          >
+            测试
+          </el-button>
           <el-button
             size="small"
             type="danger"
@@ -60,118 +90,13 @@
       width="600px"
       @close="handleDialogClose"
     >
-      <el-form
-        ref="formRef"
-        :model="form"
-        :rules="rules"
-        label-width="120px"
-      >
-        <el-form-item label="提供商" prop="provider">
-          <el-select v-model="form.provider" placeholder="请选择提供商" style="width: 100%">
-            <el-option label="WebRTC VAD" value="webrtc_vad" />
-            <el-option label="Silero VAD" value="silero_vad" />
-            <el-option label="TEN VAD" value="ten_vad" />
-          </el-select>
-        </el-form-item>
-        
-        <el-form-item label="配置名称" prop="name">
-          <el-input v-model="form.name" placeholder="请输入配置名称" />
-        </el-form-item>
-        
-        <el-form-item label="配置ID" prop="config_id">
-          <el-input v-model="form.config_id" placeholder="请输入唯一的配置ID" />
-        </el-form-item>
-        
-        <!-- 移除是否默认开关，现在在列表页操作 -->
-        
-        <!-- WebRTC VAD 配置 -->
-        <template v-if="form.provider === 'webrtc_vad'">
-          <el-divider content-position="left">WebRTC VAD 配置</el-divider>
-          <el-form-item label="最小连接池大小" prop="webrtc_vad.pool_min_size">
-            <el-input-number v-model="form.webrtc_vad.pool_min_size" :min="1" :max="1000" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="最大连接池大小" prop="webrtc_vad.pool_max_size">
-            <el-input-number v-model="form.webrtc_vad.pool_max_size" :min="1" :max="10000" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="最大空闲连接数" prop="webrtc_vad.pool_max_idle">
-            <el-input-number v-model="form.webrtc_vad.pool_max_idle" :min="1" :max="1000" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="VAD采样率" prop="webrtc_vad.vad_sample_rate">
-            <el-select v-model="form.webrtc_vad.vad_sample_rate" style="width: 100%">
-              <el-option label="8000 Hz" :value="8000" />
-              <el-option label="16000 Hz" :value="16000" />
-              <el-option label="32000 Hz" :value="32000" />
-              <el-option label="48000 Hz" :value="48000" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="VAD模式" prop="webrtc_vad.vad_mode">
-            <el-select v-model="form.webrtc_vad.vad_mode" style="width: 100%">
-              <el-option label="模式0 (质量优先)" :value="0" />
-              <el-option label="模式1 (低延迟)" :value="1" />
-              <el-option label="模式2 (平衡)" :value="2" />
-              <el-option label="模式3 (高精度)" :value="3" />
-            </el-select>
-          </el-form-item>
-        </template>
-
-        <!-- Silero VAD 配置 -->
-        <template v-if="form.provider === 'silero_vad'">
-          <el-divider content-position="left">Silero VAD 配置</el-divider>
-          <el-form-item label="模型路径" prop="silero_vad.model_path">
-            <el-input v-model="form.silero_vad.model_path" placeholder="请输入模型文件路径" />
-          </el-form-item>
-          <el-form-item label="阈值" prop="silero_vad.threshold">
-            <el-input-number v-model="form.silero_vad.threshold" :min="0" :max="1" :step="0.1" :precision="2" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="最小静音持续时间(ms)" prop="silero_vad.min_silence_duration_ms">
-            <el-input-number v-model="form.silero_vad.min_silence_duration_ms" :min="10" :max="5000" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="采样率" prop="silero_vad.sample_rate">
-            <el-select v-model="form.silero_vad.sample_rate" style="width: 100%">
-              <el-option label="8000 Hz" :value="8000" />
-              <el-option label="16000 Hz" :value="16000" />
-              <el-option label="32000 Hz" :value="32000" />
-              <el-option label="48000 Hz" :value="48000" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="声道数" prop="silero_vad.channels">
-            <el-select v-model="form.silero_vad.channels" style="width: 100%">
-              <el-option label="单声道" :value="1" />
-              <el-option label="双声道" :value="2" />
-            </el-select>
-          </el-form-item>
-          <el-form-item label="连接池大小" prop="silero_vad.pool_size">
-            <el-input-number v-model="form.silero_vad.pool_size" :min="1" :max="100" style="width: 100%" />
-          </el-form-item>
-          <el-form-item label="获取超时时间(ms)" prop="silero_vad.acquire_timeout_ms">
-            <el-input-number v-model="form.silero_vad.acquire_timeout_ms" :min="100" :max="30000" style="width: 100%" />
-          </el-form-item>
-        </template>
-
-        <!-- TEN VAD 配置 -->
-        <template v-if="form.provider === 'ten_vad'">
-          <el-divider content-position="left">TEN VAD 配置</el-divider>
-          <el-form-item label="帧移大小" prop="ten_vad.hop_size">
-            <el-input-number v-model="form.ten_vad.hop_size" :min="128" :max="1024" style="width: 100%" />
-            <div style="font-size: 12px; color: #909399; margin-top: 4px;">推荐值：512</div>
-          </el-form-item>
-          <el-form-item label="VAD检测阈值" prop="ten_vad.threshold">
-            <el-input-number v-model="form.ten_vad.threshold" :min="0" :max="1" :step="0.1" :precision="2" style="width: 100%" />
-            <div style="font-size: 12px; color: #909399; margin-top: 4px;">推荐值：0.3</div>
-          </el-form-item>
-          <el-form-item label="连接池大小" prop="ten_vad.pool_size">
-            <el-input-number v-model="form.ten_vad.pool_size" :min="1" :max="100" style="width: 100%" />
-            <div style="font-size: 12px; color: #909399; margin-top: 4px;">推荐值：10</div>
-          </el-form-item>
-          <el-form-item label="获取超时时间(ms)" prop="ten_vad.acquire_timeout_ms">
-            <el-input-number v-model="form.ten_vad.acquire_timeout_ms" :min="100" :max="30000" style="width: 100%" />
-            <div style="font-size: 12px; color: #909399; margin-top: 4px;">推荐值：3000</div>
-          </el-form-item>
-        </template>
-      </el-form>
+      <VADConfigForm ref="formRef" :model="form" :rules="rules" />
       
       <template #footer>
         <el-button @click="handleDialogClose">取消</el-button>
+        <el-button type="warning" plain @click="testCurrentConfig" :loading="testingCurrent">
+          测试
+        </el-button>
         <el-button type="primary" @click="handleSave" :loading="saving">
           保存
         </el-button>
@@ -185,8 +110,14 @@ import { ref, reactive, onMounted, computed } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { Plus } from '@element-plus/icons-vue'
 import api from '../../utils/api'
+import { testSingleConfig, testWithData, parseJsonData } from '../../utils/configTest'
+import VADConfigForm from './forms/VADConfigForm.vue'
 
 const configs = ref([])
+const testingId = ref(null)
+const testingAll = ref(false)
+const testingCurrent = ref(false)
+const testResults = ref({})
 const loading = ref(false)
 const saving = ref(false)
 const showDialog = ref(false)
@@ -196,7 +127,7 @@ const formRef = ref()
 const form = reactive({
   name: '',
   config_id: '',
-  provider: '',
+  provider: 'ten_vad',
   is_default: false,
   enabled: true,
   webrtc_vad: {
@@ -216,24 +147,12 @@ const form = reactive({
     acquire_timeout_ms: 3000
   },
   ten_vad: {
-    hop_size: 512,
+    hop_size: 320,
     threshold: 0.3,
     pool_size: 10,
     acquire_timeout_ms: 3000
   }
 })
-
-// 根据provider生成配置JSON（不带key，与ASR/LLM/TTS保持一致）
-const generateConfig = () => {
-  if (form.provider === 'webrtc_vad') {
-    return JSON.stringify(form.webrtc_vad)
-  } else if (form.provider === 'silero_vad') {
-    return JSON.stringify(form.silero_vad)
-  } else if (form.provider === 'ten_vad') {
-    return JSON.stringify(form.ten_vad)
-  }
-  return '{}'
-}
 
 const rules = {
   name: [{ required: true, message: '请输入配置名称', trigger: 'blur' }],
@@ -278,11 +197,8 @@ const editConfig = (config) => {
   form.enabled = config.enabled
   
   // 解析配置JSON并填充到对应字段
-  // 兼容新旧格式：带key的格式（{"webrtc_vad": {...}}）和不带key的格式（{...}）
   try {
     const configObj = JSON.parse(config.json_data || '{}')
-    
-    // 兼容旧格式：带key的格式（{"webrtc_vad": {...}} 或 {"silero_vad": {...}} 或 {"ten_vad": {...}}）
     if (configObj.webrtc_vad) {
       form.webrtc_vad = { ...form.webrtc_vad, ...configObj.webrtc_vad }
     } else if (configObj.silero_vad) {
@@ -290,7 +206,6 @@ const editConfig = (config) => {
     } else if (configObj.ten_vad) {
       form.ten_vad = { ...form.ten_vad, ...configObj.ten_vad }
     } else {
-      // 新格式：不带key，直接是配置对象
       if (config.provider === 'webrtc_vad') {
         form.webrtc_vad = { ...form.webrtc_vad, ...configObj }
       } else if (config.provider === 'silero_vad') {
@@ -322,7 +237,7 @@ const handleSave = async () => {
           provider: form.provider,
           is_default: isFirstConfig || form.is_default, // 首次添加时自动设为默认
           enabled: form.enabled !== undefined ? form.enabled : true,
-          json_data: generateConfig()
+          json_data: formRef.value.getJsonData()
         }
 
         if (editingConfig.value) {
@@ -388,6 +303,97 @@ const getEnabledConfigs = () => {
   return configs.value.filter(config => config.enabled)
 }
 
+function formatTestResultLabel(r) {
+  if (!r?.ok) return '错误'
+  return r.first_packet_ms != null ? `正确 ${r.first_packet_ms}ms` : '正确'
+}
+function formatTestResultTip(r) {
+  if (!r?.ok) return ''
+  return r.first_packet_ms != null ? `通过，耗时 ${r.first_packet_ms}ms` : '通过'
+}
+function formatTestMessage(result) {
+  const base = result.message || ''
+  return result.first_packet_ms != null ? `${base} ${result.first_packet_ms}ms` : base
+}
+
+const testConfig = async (row, type) => {
+  testingId.value = row.config_id
+  try {
+    const result = await testSingleConfig(type, row.config_id)
+    testResults.value = { ...testResults.value, [row.config_id]: result }
+    if (result.ok) {
+      ElMessage.success(`${row.name || row.config_id}：${formatTestMessage(result)}`)
+    } else {
+      ElMessage.warning(`${row.name || row.config_id}：${result.message}`)
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    testingId.value = null
+  }
+}
+
+const testAllConfigs = async () => {
+  const list = getEnabledConfigs()
+  if (!list.length) {
+    ElMessage.warning('没有已启用的配置')
+    return
+  }
+  testingAll.value = true
+  testResults.value = {}
+  let okCount = 0
+  try {
+    for (const row of list) {
+      try {
+        const result = await testSingleConfig('vad', row.config_id)
+        testResults.value = { ...testResults.value, [row.config_id]: result }
+        if (result.ok) okCount++
+      } catch (_) {
+        testResults.value = { ...testResults.value, [row.config_id]: { ok: false, message: '请求失败' } }
+      }
+    }
+    ElMessage.success(`全部测试完成：${okCount}/${list.length} 通过`)
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    testingAll.value = false
+  }
+}
+
+const testCurrentConfig = async () => {
+  if (!formRef.value) return
+  try {
+    await formRef.value.validate()
+  } catch (_) {
+    return
+  }
+  const configId = form.config_id?.trim()
+  if (!configId) {
+    ElMessage.warning('请填写配置ID')
+    return
+  }
+  const payload = {
+    name: form.name,
+    config_id: configId,
+    provider: form.provider,
+    is_default: form.is_default,
+    ...parseJsonData(formRef.value.getJsonData())
+  }
+  testingCurrent.value = true
+  try {
+    const result = await testWithData('vad', { [configId]: payload })
+    if (result.ok) {
+      ElMessage.success(formatTestMessage(result) || '测试通过')
+    } else {
+      ElMessage.warning(result.message || '测试未通过')
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    testingCurrent.value = false
+  }
+}
+
 const deleteConfig = async (id) => {
   try {
     await ElMessageBox.confirm('确定要删除这个配置吗？', '提示', {
@@ -411,7 +417,7 @@ const resetForm = () => {
   Object.assign(form, {
     name: '',
     config_id: '',
-    provider: '',
+    provider: 'ten_vad',
     is_default: false,
     enabled: true,
     webrtc_vad: {
@@ -431,7 +437,7 @@ const resetForm = () => {
       acquire_timeout_ms: 3000
     },
     ten_vad: {
-      hop_size: 512,
+      hop_size: 320,
       threshold: 0.3,
       pool_size: 10,
       acquire_timeout_ms: 3000
@@ -475,4 +481,9 @@ onMounted(() => {
   margin: 0;
   color: #333;
 }
+
+.test-result { font-size: 12px; }
+.test-result.test-ok { color: var(--el-color-success); }
+.test-result.test-err { color: var(--el-color-danger); cursor: help; }
+.test-result.test-none { color: var(--el-text-color-placeholder); }
 </style>

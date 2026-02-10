@@ -16,6 +16,7 @@ import (
 	log "xiaozhi-esp32-server-golang/logger"
 
 	rotatelogs "github.com/lestrrat-go/file-rotatelogs"
+	"github.com/mitchellh/hashstructure/v2"
 	logrus "github.com/sirupsen/logrus"
 
 	"github.com/spf13/viper"
@@ -41,6 +42,7 @@ func Init(configFile string) error {
 	initLog()
 
 	// 初始化配置系统（包括WebSocket连接）
+	// 注意：不要在此处单独注册 ApplySystemConfigToViper，否则会先于 main 的回调执行，导致 main 里读取的「当前配置」已是合并后的新配置；合并应在 main 的回调中、在读取 current 并比较之后再执行。
 	ctx := context.Background()
 	if err := user_config.InitConfigSystem(ctx); err != nil {
 		fmt.Printf("初始化配置系统失败: %v\n", err)
@@ -133,6 +135,36 @@ func initConfig(configFile string) error {
 	return nil
 }
 
+// ApplySystemConfigToViper 将系统配置合并到 viper，用于 WebSocket 推送的 system_config 实时更新（回调无返回值）
+func ApplySystemConfigToViper(data map[string]interface{}) {
+	if err := viper.MergeConfigMap(data); err != nil {
+		log.Warnf("合并推送配置到 viper 失败: %v", err)
+		return
+	}
+	log.Info("已从 WebSocket 推送合并系统配置到 viper")
+}
+
+// SystemConfigEqual 比较两段系统配置是否语义相同（使用 hashstructure 指纹，与 map key 顺序无关）
+func SystemConfigEqual(a, b interface{}) bool {
+	if a == nil && b == nil {
+		log.Debugf("[SystemConfigEqual] 结果: true (均为 nil)")
+		return true
+	}
+	if a == nil || b == nil {
+		log.Debugf("[SystemConfigEqual] 结果: false (一方为 nil)")
+		return false
+	}
+	ha, err1 := hashstructure.Hash(a, hashstructure.FormatV2, nil)
+	hb, err2 := hashstructure.Hash(b, hashstructure.FormatV2, nil)
+	if err1 != nil || err2 != nil {
+		log.Debugf("[SystemConfigEqual] 结果: false (Hash 失败 err1=%v err2=%v)", err1, err2)
+		return false
+	}
+	equal := ha == hb
+	log.Debugf("[SystemConfigEqual] 结果: %t (ha=%d hb=%d), a: %+v, b: %+v", equal, ha, hb, a, b)
+	return equal
+}
+
 // updateConfigFromAPI 从接口获取配置并更新viper配置
 // 内部会持续重试，直到成功后才返回
 func updateConfigFromAPI() error {
@@ -181,7 +213,7 @@ func updateConfigFromAPI() error {
 			continue
 		}
 
-		log.Debugf("Load config from API: %+v", configMap)
+		//log.Debugf("Load config from API: %+v", configMap)
 
 		// 使用viper.MergeConfigMap设置到viper
 		if err := viper.MergeConfigMap(configMap); err != nil {

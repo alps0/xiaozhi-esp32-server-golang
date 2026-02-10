@@ -77,7 +77,7 @@
               <el-form-item label="WebSocket URL" prop="test.websocket.url" class="form-item full-width">
                  <el-input 
                    v-model="form.test.websocket.url" 
-                   placeholder="请输入Test环境WebSocket URL"
+                   placeholder="例如: ws://host:port/xiaozhi/v1/"
                    size="large"
                    :prefix-icon="Link"
                  />
@@ -114,6 +114,12 @@
               </el-form-item>
             </div>
           </div>
+          <div class="card-actions">
+            <el-button type="warning" size="large" :loading="otaTestingTest" @click="testOtaEnv('test')" class="env-test-btn">
+              <el-icon><CircleCheck /></el-icon>
+              测试 Test 环境
+            </el-button>
+          </div>
         </el-card>
         
         <!-- External环境配置卡片 -->
@@ -139,7 +145,7 @@
               <el-form-item label="WebSocket URL" prop="external.websocket.url" class="form-item full-width">
                  <el-input 
                    v-model="form.external.websocket.url" 
-                   placeholder="请输入External环境WebSocket URL"
+                   placeholder="例如: ws://host:port/xiaozhi/v1/"
                    size="large"
                    :prefix-icon="Link"
                  />
@@ -176,6 +182,12 @@
               </el-form-item>
             </div>
           </div>
+          <div class="card-actions">
+            <el-button type="warning" size="large" :loading="otaTestingExternal" @click="testOtaEnv('external')" class="env-test-btn">
+              <el-icon><CircleCheck /></el-icon>
+              测试 External 环境
+            </el-button>
+          </div>
         </el-card>
         
         <!-- 操作按钮 -->
@@ -201,12 +213,15 @@ import { ref, reactive, onMounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { 
   Setting, Tools, Monitor, Platform, Connection, Message, 
-  Edit, Key, Link, User, Lock, Check, QuestionFilled 
+  Edit, Key, Link, User, Lock, Check, QuestionFilled, CircleCheck 
 } from '@element-plus/icons-vue'
 import api from '@/utils/api'
+import { testWithData } from '@/utils/configTest'
 
 const loading = ref(false)
 const saving = ref(false)
+const otaTestingTest = ref(false)
+const otaTestingExternal = ref(false)
 const configId = ref(null)
 const formRef = ref()
 
@@ -372,7 +387,89 @@ const saveConfig = async () => {
   }
 }
 
+// env: 'test' | 'external'，测试对应环境的 WebSocket 和 MQTT UDP（如果启用）
+const testOtaEnv = async (env) => {
+  const envConfig = env === 'test' ? form.test : form.external
+  const mqttEnabled = envConfig.mqtt.enable
 
+  const payload = {
+    signature_key: form.signature_key,
+    test: {
+      websocket: { url: env === 'test' ? form.test.websocket.url : '' },
+      mqtt: { enable: form.test.mqtt.enable, endpoint: form.test.mqtt.endpoint }
+    },
+    external: {
+      websocket: { url: env === 'external' ? form.external.websocket.url : '' },
+      mqtt: { enable: form.external.mqtt.enable, endpoint: form.external.mqtt.endpoint }
+    }
+  }
+  const loadingRef = env === 'test' ? otaTestingTest : otaTestingExternal
+  loadingRef.value = true
+  try {
+    // 直接调用API获取原始响应，包含完整的websocket和mqtt_udp结果
+    const body = { types: ['ota'], data: { ota: { ota_ota_config: payload } } }
+    const res = await api.post('/admin/configs/test', body, { timeout: 30000 })
+    const data = res.data?.data ?? res.data
+    const otaResult = data?.ota?.ota_ota_config
+
+    const label = env === 'test' ? 'Test 环境' : 'External 环境'
+
+    if (!otaResult) {
+      ElMessage.error(`${label}：未返回测试结果`)
+      return
+    }
+
+    // 解析WebSocket结果
+    const wsResult = otaResult.websocket || {}
+    const wsOk = wsResult.ok || false
+    const wsMsg = wsResult.message || 'WebSocket测试失败'
+    const wsMs = wsResult.first_packet_ms
+
+    // 解析MQTT UDP结果
+    const mqttResult = otaResult.mqtt_udp
+    let mqttOk = true
+    let mqttMsg = ''
+    let mqttMs = 0
+
+    if (mqttEnabled && mqttResult) {
+      mqttOk = mqttResult.ok || false
+      mqttMsg = mqttResult.message || 'MQTT UDP测试失败'
+      mqttMs = mqttResult.first_packet_ms || 0
+    } else if (mqttEnabled) {
+      mqttOk = false
+      mqttMsg = 'MQTT UDP未返回结果'
+    }
+
+    // 构建结果显示
+    let message = ''
+    if (wsOk) {
+      message += `WebSocket: ${wsMsg}`
+      if (wsMs != null) message += ` (${wsMs}ms)`
+    } else {
+      message += `WebSocket: ${wsMsg}`
+    }
+
+    if (mqttEnabled) {
+      message += ' | '
+      if (mqttOk) {
+        message += `MQTT UDP: ${mqttMsg}`
+        if (mqttMs != null) message += ` (${mqttMs}ms)`
+      } else {
+        message += `MQTT UDP: ${mqttMsg}`
+      }
+    }
+
+    if (wsOk && (!mqttEnabled || mqttOk)) {
+      ElMessage.success(`${label}：${message}`)
+    } else {
+      ElMessage.warning(`${label}：${message}`)
+    }
+  } catch (err) {
+    ElMessage.error(err.response?.data?.error || '测试请求失败')
+  } finally {
+    loadingRef.value = false
+  }
+}
 
 // 监听provider变化，重置表单为默认值
 watch(() => form.provider, (newProvider) => {
@@ -583,6 +680,18 @@ onMounted(() => {
 
 .config-section:last-child {
   margin-bottom: 0;
+}
+
+.card-actions {
+  margin-top: 1.25rem;
+  padding-top: 1.25rem;
+  border-top: 1px solid #eee;
+}
+
+.env-test-btn {
+  font-size: 1rem;
+  padding: 12px 24px;
+  min-width: 160px;
 }
 
 .section-title {

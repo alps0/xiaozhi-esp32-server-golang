@@ -2,8 +2,6 @@ package pool
 
 import (
 	"context"
-	"crypto/md5"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"sync"
@@ -17,6 +15,7 @@ import (
 	"xiaozhi-esp32-server-golang/internal/util"
 	log "xiaozhi-esp32-server-golang/logger"
 
+	"github.com/mitchellh/hashstructure/v2"
 	"github.com/spf13/viper"
 )
 
@@ -123,25 +122,27 @@ func RegisterResourceType[T any](
 }
 
 // GenerateConfigKey 生成配置键（用于区分不同配置的资源池）
+// 使用 hashstructure 做与 map key 顺序无关的指纹，同一语义配置得到相同 key，避免重复建池。
 func GenerateConfigKey(provider string, config map[string]interface{}) string {
-	configJSON, err := json.Marshal(config)
+	input := map[string]interface{}{"provider": provider, "config": config}
+	h, err := hashstructure.Hash(input, hashstructure.FormatV2, nil)
 	if err != nil {
-		log.Warnf("序列化配置失败，使用provider作为key: %v", err)
+		log.Warnf("配置指纹计算失败，使用 provider 作为 key: %v", err)
 		return provider
 	}
-	hash := md5.Sum([]byte(provider + string(configJSON)))
-	return hex.EncodeToString(hash[:])
+	return fmt.Sprintf("%016x", h)
 }
 
 // getOrCreatePool 获取或创建资源池（泛型版本）
+// 使用配置指纹作为 poolKey，同一 config_id 在 host 等配置变更后会使用新池、新配置实例。
 func getOrCreatePool[T any](
 	resourceType, provider string,
 	config map[string]interface{},
 ) (*util.ResourcePool, error) {
 	mgr := GetGlobalResourcePoolManager()
-	// 所有资源池的 key 格式统一为：类型:provider
-	poolKey := fmt.Sprintf("%s:%s", resourceType, provider)
-	configKey := provider // configKey 也使用 provider，用于 ResourceWrapper
+	// 资源池 key 格式统一为：类型:配置指纹（provider+config 的 MD5）
+	configKey := GenerateConfigKey(provider, config)
+	poolKey := fmt.Sprintf("%s:%s", resourceType, configKey)
 
 	mgr.mu.RLock()
 	pool, exists := mgr.pools[poolKey]
@@ -208,7 +209,11 @@ func getOrCreatePool[T any](
 	}
 
 	mgr.pools[poolKey] = pool
-	log.Infof("创建资源池: type=%s, provider=%s, configKey=%s", resourceType, provider, configKey)
+	fpShort := configKey
+	if len(configKey) > 8 {
+		fpShort = configKey[:8] + "..."
+	}
+	log.Infof("创建资源池: type=%s, provider=%s, fingerprint=%s", resourceType, provider, fpShort)
 
 	return pool, nil
 }

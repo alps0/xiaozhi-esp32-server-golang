@@ -55,6 +55,12 @@ const routes = [
         meta: { requiresAuth: true, requiresAdmin: true },
         children: [
           {
+            path: 'config-wizard',
+            name: 'ConfigWizard',
+            component: () => import('../views/admin/ConfigWizard.vue'),
+            meta: { title: '配置向导' }
+          },
+          {
             path: 'vad-config',
             name: 'VADConfig',
             component: () => import('../views/admin/VADConfig.vue'),
@@ -231,10 +237,14 @@ router.beforeEach(async (to, from, next) => {
     return
   }
   
-  // 如果访问登录页且已登录，根据角色跳转
+  // 如果访问登录页且已登录，根据角色跳转（管理员首次未完成向导则去配置向导）
   if (to.path === '/login' && authStore.isAuthenticated) {
     if (authStore.user?.role === 'admin') {
-      next('/dashboard')
+      if (!localStorage.getItem('admin_first_login_done')) {
+        next('/admin/config-wizard')
+      } else {
+        next('/dashboard')
+      }
     } else {
       next('/console')
     }
@@ -284,10 +294,14 @@ router.beforeEach(async (to, from, next) => {
     }
   }
   
-  // 如果访问根路径，根据角色跳转
+  // 如果访问根路径，根据角色跳转（管理员首次未完成向导则去配置向导）
   if (to.path === '/' && authStore.isAuthenticated) {
     if (authStore.user?.role === 'admin') {
-      next('/dashboard')
+      if (!localStorage.getItem('admin_first_login_done')) {
+        next('/admin/config-wizard')
+      } else {
+        next('/dashboard')
+      }
     } else {
       next('/console')
     }
