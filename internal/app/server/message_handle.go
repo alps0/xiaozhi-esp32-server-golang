@@ -144,6 +144,9 @@ func (w *MessageWorker) processMemoryProvider(event *eventbus.AddMessageEvent) {
 	if clientState.MemoryProvider == nil {
 		return
 	}
+	if clientState.GetMemoryMode() != MemoryModeLong {
+		return
+	}
 
 	err := clientState.MemoryProvider.AddMessage(
 		clientState.Ctx,

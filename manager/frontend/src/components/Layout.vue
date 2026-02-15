@@ -64,6 +64,7 @@
           <el-menu-item index="/admin/tts-config">TTS配置</el-menu-item>
           <el-menu-item index="/admin/vision-config">Vision配置</el-menu-item>
           <el-menu-item index="/admin/memory-config">Memory配置</el-menu-item>
+          <el-menu-item index="/admin/chat-settings">聊天设置</el-menu-item>
         </el-sub-menu>
         
         <!-- 系统监控 -->

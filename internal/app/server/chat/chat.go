@@ -80,6 +80,7 @@ func GenClientState(pctx context.Context, deviceID string) (*ClientState, error)
 		log.Errorf("获取 设备 %s 配置失败: %+v", deviceID, err)
 		return nil, err
 	}
+	deviceConfig.MemoryMode = NormalizeMemoryMode(deviceConfig.MemoryMode)
 
 	// 创建带取消功能的上下文
 	ctx, cancel := context.WithCancel(pctx)
@@ -150,6 +151,7 @@ func (c *ChatManager) ReloadDeviceConfig(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("获取设备配置失败: %w", err)
 	}
+	deviceConfig.MemoryMode = NormalizeMemoryMode(deviceConfig.MemoryMode)
 
 	c.clientState.AgentID = deviceConfig.AgentId
 	c.clientState.DeviceConfig = deviceConfig

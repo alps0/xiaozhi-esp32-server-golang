@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	"sync"
@@ -36,7 +37,22 @@ const (
 	ClientStatusListenStop = "listenStop"
 	ClientStatusLLMStart   = "llmStart"
 	ClientStatusTTSStart   = "ttsStart"
+
+	MemoryModeNone  = "none"
+	MemoryModeShort = "short"
+	MemoryModeLong  = "long"
 )
+
+func NormalizeMemoryMode(mode string) string {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case MemoryModeNone:
+		return MemoryModeNone
+	case MemoryModeLong:
+		return MemoryModeLong
+	default:
+		return MemoryModeShort
+	}
+}
 
 type SendAudioData func(audioData []byte) error
 
@@ -125,6 +141,10 @@ func (c *ClientState) HasSpeakerGroups() bool {
 
 func (c *ClientState) IsRealTime() bool {
 	return c.ListenMode == "realtime"
+}
+
+func (c *ClientState) GetMemoryMode() string {
+	return NormalizeMemoryMode(c.DeviceConfig.MemoryMode)
 }
 
 func (c *ClientState) GetDeviceIDOrAgentID() string {
