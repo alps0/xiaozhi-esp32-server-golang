@@ -717,6 +717,125 @@ func (ctrl *WebSocketController) RequestMcpToolsFromClient(ctx context.Context, 
 	}
 }
 
+// RequestDeviceMcpToolsFromClient 请求设备维度MCP工具列表（广播方式，等待第一个非空列表响应）
+func (ctrl *WebSocketController) RequestDeviceMcpToolsFromClient(ctx context.Context, deviceID string) ([]string, error) {
+	log.Printf("开始请求设备MCP工具列表，deviceID: %s", deviceID)
+
+	body := map[string]interface{}{
+		"device_id": deviceID,
+	}
+
+	return ctrl.requestMcpToolsByBody(ctx, body)
+}
+
+func (ctrl *WebSocketController) requestMcpToolsByBody(ctx context.Context, body map[string]interface{}) ([]string, error) {
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccess(ctx, "GET", "/api/mcp/tools", body)
+	if err != nil {
+		return nil, err
+	}
+
+	toolsData, ok := response.Body["tools"]
+	if !ok {
+		return []string{}, nil
+	}
+
+	var tools []string
+	switch v := toolsData.(type) {
+	case []interface{}:
+		for _, tool := range v {
+			if toolStr, ok := tool.(string); ok {
+				tools = append(tools, toolStr)
+			} else if toolMap, ok := tool.(map[string]interface{}); ok {
+				if name, ok := toolMap["name"].(string); ok {
+					tools = append(tools, name)
+				}
+			}
+		}
+	case []string:
+		tools = v
+	}
+
+	return tools, nil
+}
+
+// CallMcpToolFromClient 请求客户端执行MCP工具调用
+func (ctrl *WebSocketController) CallMcpToolFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error) {
+	response, err := ctrl.broadcastRequestAndWaitFirstSuccess(ctx, "POST", "/api/mcp/call", body)
+	if err != nil {
+		return nil, err
+	}
+
+	if response.Body == nil {
+		return map[string]interface{}{}, nil
+	}
+
+	return response.Body, nil
+}
+
+func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context.Context, method, path string, body map[string]interface{}) (*WebSocketResponse, error) {
+	responseChan := make(chan *WebSocketResponse, 10)
+	requestID := uuid.New().String()
+
+	responseHandler := func(response *WebSocketResponse) {
+		select {
+		case responseChan <- response:
+		default:
+			log.Printf("响应通道已满，丢弃响应: %s", response.ID)
+		}
+	}
+
+	callbacksRegistered := 0
+	for item := range ctrl.clientsMap.IterBuffered() {
+		client := item.Val
+		if !client.isConnected {
+			continue
+		}
+
+		client.mu.Lock()
+		client.callbacks[requestID] = responseHandler
+		client.mu.Unlock()
+		callbacksRegistered++
+
+		request := WebSocketRequest{ID: requestID, Method: method, Path: path, Body: body}
+		if err := client.conn.WriteJSON(request); err != nil {
+			log.Printf("向客户端 %s 发送请求失败: %v", client.ID, err)
+		}
+	}
+
+	if callbacksRegistered == 0 {
+		return nil, fmt.Errorf("没有连接的客户端")
+	}
+
+	defer func() {
+		for item := range ctrl.clientsMap.IterBuffered() {
+			client := item.Val
+			client.mu.Lock()
+			delete(client.callbacks, requestID)
+			client.mu.Unlock()
+		}
+		close(responseChan)
+	}()
+
+	responsesReceived := 0
+	timeout := time.After(30 * time.Second)
+	for {
+		select {
+		case response := <-responseChan:
+			responsesReceived++
+			if response != nil && response.Status == http.StatusOK {
+				return response, nil
+			}
+			if responsesReceived >= callbacksRegistered {
+				return nil, fmt.Errorf("所有客户端都返回失败")
+			}
+		case <-timeout:
+			return nil, fmt.Errorf("请求超时")
+		case <-ctx.Done():
+			return nil, fmt.Errorf("上下文取消")
+		}
+	}
+}
+
 // 请求客户端服务器信息
 func (ctrl *WebSocketController) RequestServerInfoFromClient(ctx context.Context, uuid string) (*WebSocketResponse, error) {
 	return ctrl.SendRequestToClient(ctx, uuid, "GET", "/api/server/info", nil)

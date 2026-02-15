@@ -719,6 +719,10 @@ func (c *WebSocketClient) handleDefaultRequest(request *WebSocketRequest) {
 		// 处理MCP工具列表请求
 		c.handleMcpToolListRequest(request)
 
+	case "/api/mcp/call":
+		// 处理MCP工具调用请求
+		c.handleMcpToolCallRequest(request)
+
 	case "/api/server/info":
 		// 返回服务器信息
 		response := map[string]interface{}{
@@ -932,46 +936,64 @@ func mapToStruct(data map[string]interface{}, target interface{}) error {
 }
 
 // GetMcpToolsByAgentID 根据agent_id获取MCP工具列表
-func GetMcpToolsByAgentID(agentID string) ([]string, error) {
+func getMcpTools(agentID, deviceID string) ([]string, error) {
 	nameList := make([]string, 0)
 
-	allTools, err := mcp.GetWsEndpointMcpTools(agentID)
-	if err != nil {
-		log.Errorf("获取MCP工具列表失败: %v", err)
-		return nameList, err
+	var allTools map[string]interface{}
+	if deviceID != "" {
+		toolMap, err := mcp.GetToolsByDeviceId(deviceID, agentID)
+		if err != nil {
+			log.Errorf("获取设备MCP工具列表失败: %v", err)
+			return nameList, err
+		}
+		allTools = make(map[string]interface{}, len(toolMap))
+		for k, v := range toolMap {
+			allTools[k] = v
+		}
+	} else {
+		toolMap, err := mcp.GetWsEndpointMcpTools(agentID)
+		if err != nil {
+			log.Errorf("获取智能体MCP工具列表失败: %v", err)
+			return nameList, err
+		}
+		allTools = make(map[string]interface{}, len(toolMap))
+		for k, v := range toolMap {
+			allTools[k] = v
+		}
 	}
 
-	// 转换工具列表格式
-	for name, _ := range allTools {
+	for name := range allTools {
 		nameList = append(nameList, name)
 	}
-
-	log.Infof("为agent_id %s 获取到 %d 个MCP工具", agentID, len(nameList))
 	return nameList, nil
 }
 
 // handleMcpToolListRequest 处理MCP工具列表请求
 func (c *WebSocketClient) handleMcpToolListRequest(request *WebSocketRequest) {
-	// 从请求体中获取agent_id
+	// 从请求体中获取agent_id/device_id
 	agentID := ""
+	deviceID := ""
 	if request.Body != nil {
 		if id, ok := request.Body["agent_id"].(string); ok {
 			agentID = id
 		}
+		if id, ok := request.Body["device_id"].(string); ok {
+			deviceID = id
+		}
 	}
 
-	if agentID == "" {
-		log.Warnf("收到MCP工具列表请求，但缺少agent_id")
-		if err := c.SendResponse(request.ID, 400, nil, "缺少agent_id参数"); err != nil {
+	if agentID == "" && deviceID == "" {
+		log.Warnf("收到MCP工具列表请求，但缺少agent_id/device_id")
+		if err := c.SendResponse(request.ID, 400, nil, "缺少agent_id或device_id参数"); err != nil {
 			log.Errorf("发送错误响应失败: %v", err)
 		}
 		return
 	}
 
-	log.Infof("处理MCP工具列表请求，agent_id: %s", agentID)
+	log.Infof("处理MCP工具列表请求，agent_id: %s, device_id: %s", agentID, deviceID)
 
 	// 获取工具列表
-	nameList, err := GetMcpToolsByAgentID(agentID)
+	nameList, err := getMcpTools(agentID, deviceID)
 	if err != nil {
 		log.Errorf("获取MCP工具列表失败: %v", err)
 		if err := c.SendResponse(request.ID, 500, nil, fmt.Sprintf("获取工具列表失败: %v", err)); err != nil {
@@ -982,9 +1004,10 @@ func (c *WebSocketClient) handleMcpToolListRequest(request *WebSocketRequest) {
 
 	// 构造响应
 	response := map[string]interface{}{
-		"agent_id": agentID,
-		"tools":    nameList,
-		"count":    len(nameList),
+		"agent_id":  agentID,
+		"device_id": deviceID,
+		"tools":     nameList,
+		"count":     len(nameList),
 	}
 
 	// 发送响应
@@ -1081,4 +1104,51 @@ func Close() error {
 // IsConnected 检查Manager配置提供者是否已连接
 func IsConnected() bool {
 	return IsManagerWebSocketConnected()
+}
+
+// handleMcpToolCallRequest 处理MCP工具调用请求
+func (c *WebSocketClient) handleMcpToolCallRequest(request *WebSocketRequest) {
+	agentID := ""
+	deviceID := ""
+	toolName := ""
+	arguments := map[string]interface{}{}
+	if request.Body != nil {
+		if id, ok := request.Body["agent_id"].(string); ok {
+			agentID = id
+		}
+		if id, ok := request.Body["device_id"].(string); ok {
+			deviceID = id
+		}
+		if t, ok := request.Body["tool_name"].(string); ok {
+			toolName = t
+		}
+		if args, ok := request.Body["arguments"].(map[string]interface{}); ok {
+			arguments = args
+		}
+	}
+
+	if toolName == "" || (agentID == "" && deviceID == "") {
+		_ = c.SendResponse(request.ID, 400, nil, "缺少tool_name或agent_id/device_id参数")
+		return
+	}
+
+	invokable, ok := mcp.GetToolByName(deviceID, agentID, toolName)
+	if !ok {
+		_ = c.SendResponse(request.ID, 404, nil, fmt.Sprintf("工具不存在: %s", toolName))
+		return
+	}
+
+	argBytes, _ := json.Marshal(arguments)
+	result, err := invokable.InvokableRun(context.Background(), string(argBytes))
+	if err != nil {
+		_ = c.SendResponse(request.ID, 500, nil, fmt.Sprintf("工具调用失败: %v", err))
+		return
+	}
+
+	_ = c.SendResponse(request.ID, 200, map[string]interface{}{
+		"agent_id":  agentID,
+		"device_id": deviceID,
+		"tool_name": toolName,
+		"result":    result,
+	}, "")
 }

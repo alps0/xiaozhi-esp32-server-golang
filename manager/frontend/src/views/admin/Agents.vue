@@ -179,6 +179,20 @@
           </div>
         </div>
 
+        <el-divider />
+        <el-form :model="mcpCallForm" label-width="90px">
+          <el-form-item label="工具">
+            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width: 100%">
+              <el-option v-for="tool in mcpTools" :key="tool.name" :label="tool.name" :value="tool.name" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="参数JSON">
+            <el-input v-model="mcpCallForm.argumentsText" type="textarea" :rows="6" placeholder='例如: {"query":"hello"}' />
+          </el-form-item>
+        </el-form>
+        <el-button type="primary" @click="callAgentMcpTool" :loading="callingTool">调用工具</el-button>
+        <div class="endpoint-content" style="margin-top: 12px">{{ mcpCallResult || "暂无调用结果" }}</div>
+
         <el-alert
           title="接入点信息"
           description="这是智能体的MCP WebSocket接入点URL，可用于设备连接"
@@ -232,6 +246,9 @@ const mcpEndpointData = ref({
 const toolsLoading = ref(false)
 const mcpTools = ref([])
 const currentAgentId = ref(null)
+const callingTool = ref(false)
+const mcpCallResult = ref('')
+const mcpCallForm = ref({ tool_name: '', argumentsText: '{}' })
 
 const agentForm = ref({
   user_id: null,
@@ -405,6 +422,8 @@ const showMCPEndpoint = async (agent) => {
   showMCPDialog.value = true
   mcpLoading.value = true
   currentAgentId.value = agent.id
+  mcpCallResult.value = ""
+  mcpCallForm.value = { tool_name: "", argumentsText: "{}" }
   
   try {
     const response = await api.get(`/admin/agents/${agent.id}/mcp-endpoint`)
@@ -433,6 +452,9 @@ const refreshMcpTools = async () => {
     const response = await api.get(`/admin/agents/${currentAgentId.value}/mcp-tools`)
     if (response.data.data && response.data.data.tools) {
       mcpTools.value = response.data.data.tools
+      if (!mcpCallForm.value.tool_name && mcpTools.value.length > 0) {
+        mcpCallForm.value.tool_name = mcpTools.value[0].name
+      }
       ElMessage.success(`成功获取 ${mcpTools.value.length} 个工具`)
     } else {
       mcpTools.value = []
@@ -448,6 +470,38 @@ const refreshMcpTools = async () => {
 }
 
 
+
+
+
+const callAgentMcpTool = async () => {
+  if (!currentAgentId.value || !mcpCallForm.value.tool_name) {
+    ElMessage.warning('请选择工具')
+    return
+  }
+
+  let argumentsObj = {}
+  try {
+    argumentsObj = mcpCallForm.value.argumentsText ? JSON.parse(mcpCallForm.value.argumentsText) : {}
+  } catch (e) {
+    ElMessage.error('参数JSON格式错误')
+    return
+  }
+
+  callingTool.value = true
+  try {
+    const response = await api.post(`/admin/agents/${currentAgentId.value}/mcp-call`, {
+      tool_name: mcpCallForm.value.tool_name,
+      arguments: argumentsObj
+    })
+    mcpCallResult.value = JSON.stringify(response.data.data || {}, null, 2)
+    ElMessage.success('MCP工具调用成功')
+  } catch (error) {
+    mcpCallResult.value = JSON.stringify(error.response?.data || { error: error.message }, null, 2)
+    ElMessage.error('MCP工具调用失败')
+  } finally {
+    callingTool.value = false
+  }
+}
 
 // 复制MCP接入点URL
 const copyMCPEndpoint = async () => {
