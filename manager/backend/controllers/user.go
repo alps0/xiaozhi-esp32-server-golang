@@ -19,8 +19,8 @@ import (
 type UserController struct {
 	DB                  *gorm.DB
 	WebSocketController interface {
-		RequestMcpToolsFromClient(ctx context.Context, agentID string) ([]string, error)
-		RequestDeviceMcpToolsFromClient(ctx context.Context, deviceID string) ([]string, error)
+		RequestMcpToolDetailsFromClient(ctx context.Context, agentID string) ([]MCPTool, error)
+		RequestDeviceMcpToolDetailsFromClient(ctx context.Context, deviceID string) ([]MCPTool, error)
 		CallMcpToolFromClient(ctx context.Context, body map[string]interface{}) (map[string]interface{}, error)
 		InjectMessageToDevice(ctx context.Context, deviceID, message string, skipLlm bool) error
 	}
@@ -570,16 +570,12 @@ func (uc *UserController) GetDeviceMcpTools(c *gin.Context) {
 		return
 	}
 
-	toolNames, err := uc.WebSocketController.RequestDeviceMcpToolsFromClient(context.Background(), device.DeviceName)
+	tools, err := uc.WebSocketController.RequestDeviceMcpToolDetailsFromClient(context.Background(), device.DeviceName)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": []interface{}{}}})
 		return
 	}
 
-	tools := make([]gin.H, 0, len(toolNames))
-	for _, toolName := range toolNames {
-		tools = append(tools, gin.H{"name": toolName, "description": fmt.Sprintf("MCP工具: %s", toolName), "schema": true})
-	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": tools}})
 }
 

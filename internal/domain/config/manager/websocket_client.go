@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -935,37 +936,110 @@ func mapToStruct(data map[string]interface{}, target interface{}) error {
 	return json.Unmarshal(jsonData, target)
 }
 
-// GetMcpToolsByAgentID 根据agent_id获取MCP工具列表
-func getMcpTools(agentID, deviceID string) ([]string, error) {
-	nameList := make([]string, 0)
-
-	var allTools map[string]interface{}
-	if deviceID != "" {
-		toolMap, err := mcp.GetToolsByDeviceId(deviceID, agentID)
-		if err != nil {
-			log.Errorf("获取设备MCP工具列表失败: %v", err)
-			return nameList, err
-		}
-		allTools = make(map[string]interface{}, len(toolMap))
-		for k, v := range toolMap {
-			allTools[k] = v
-		}
-	} else {
-		toolMap, err := mcp.GetWsEndpointMcpTools(agentID)
-		if err != nil {
-			log.Errorf("获取智能体MCP工具列表失败: %v", err)
-			return nameList, err
-		}
-		allTools = make(map[string]interface{}, len(toolMap))
-		for k, v := range toolMap {
-			allTools[k] = v
-		}
+func toolInfoToSchemaMap(paramsOneOf interface{}) map[string]interface{} {
+	if paramsOneOf == nil {
+		return nil
 	}
 
-	for name := range allTools {
-		nameList = append(nameList, name)
+	raw, err := json.Marshal(paramsOneOf)
+	if err != nil {
+		return nil
 	}
-	return nameList, nil
+
+	decoded := map[string]interface{}{}
+	if err = json.Unmarshal(raw, &decoded); err != nil {
+		return nil
+	}
+
+	if openAPIV3, ok := decoded["openAPIV3"].(map[string]interface{}); ok {
+		return openAPIV3
+	}
+	if openAPIV3, ok := decoded["open_api_v3"].(map[string]interface{}); ok {
+		return openAPIV3
+	}
+	return decoded
+}
+
+func buildExampleFromSchema(schema map[string]interface{}) interface{} {
+	if schema == nil {
+		return map[string]interface{}{}
+	}
+
+	if enumValues, ok := schema["enum"].([]interface{}); ok && len(enumValues) > 0 {
+		return enumValues[0]
+	}
+
+	typeValue, _ := schema["type"].(string)
+	switch typeValue {
+	case "object", "":
+		result := map[string]interface{}{}
+		if properties, ok := schema["properties"].(map[string]interface{}); ok {
+			keys := make([]string, 0, len(properties))
+			for key := range properties {
+				keys = append(keys, key)
+			}
+			sort.Strings(keys)
+			for _, key := range keys {
+				propSchema, _ := properties[key].(map[string]interface{})
+				result[key] = buildExampleFromSchema(propSchema)
+			}
+		}
+		return result
+	case "array":
+		if items, ok := schema["items"].(map[string]interface{}); ok {
+			return []interface{}{buildExampleFromSchema(items)}
+		}
+		return []interface{}{}
+	case "number":
+		return 0.1
+	case "integer":
+		return 0
+	case "boolean":
+		return false
+	default:
+		return ""
+	}
+}
+
+func getMcpTools(agentID, deviceID string) ([]map[string]interface{}, error) {
+	toolList := make([]map[string]interface{}, 0)
+
+	// 仅返回设备/智能体上报的MCP工具，不包含本地与全局MCP
+	reportedTools, err := mcp.GetReportedToolsByDeviceIdAndAgentId(deviceID, agentID)
+	if err != nil {
+		log.Errorf("获取上报MCP工具列表失败: %v", err)
+		return toolList, err
+	}
+
+	names := make([]string, 0, len(reportedTools))
+	for name := range reportedTools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		invokable := reportedTools[name]
+		toolInfo := map[string]interface{}{
+			"name":        name,
+			"description": fmt.Sprintf("MCP工具: %s", name),
+			"schema":      true,
+		}
+
+		if info, err := invokable.Info(context.Background()); err == nil && info != nil {
+			if info.Desc != "" {
+				toolInfo["description"] = info.Desc
+			}
+			inputSchema := toolInfoToSchemaMap(info.ParamsOneOf)
+			if inputSchema != nil {
+				toolInfo["input_schema"] = inputSchema
+				toolInfo["example_arguments"] = buildExampleFromSchema(inputSchema)
+			}
+		}
+
+		toolList = append(toolList, toolInfo)
+	}
+
+	return toolList, nil
 }
 
 // handleMcpToolListRequest 处理MCP工具列表请求
@@ -993,7 +1067,7 @@ func (c *WebSocketClient) handleMcpToolListRequest(request *WebSocketRequest) {
 	log.Infof("处理MCP工具列表请求，agent_id: %s, device_id: %s", agentID, deviceID)
 
 	// 获取工具列表
-	nameList, err := getMcpTools(agentID, deviceID)
+	toolList, err := getMcpTools(agentID, deviceID)
 	if err != nil {
 		log.Errorf("获取MCP工具列表失败: %v", err)
 		if err := c.SendResponse(request.ID, 500, nil, fmt.Sprintf("获取工具列表失败: %v", err)); err != nil {
@@ -1006,8 +1080,8 @@ func (c *WebSocketClient) handleMcpToolListRequest(request *WebSocketRequest) {
 	response := map[string]interface{}{
 		"agent_id":  agentID,
 		"device_id": deviceID,
-		"tools":     nameList,
-		"count":     len(nameList),
+		"tools":     toolList,
+		"count":     len(toolList),
 	}
 
 	// 发送响应
@@ -1132,7 +1206,8 @@ func (c *WebSocketClient) handleMcpToolCallRequest(request *WebSocketRequest) {
 		return
 	}
 
-	invokable, ok := mcp.GetToolByName(deviceID, agentID, toolName)
+	// 仅处理设备/智能体上报的MCP工具
+	invokable, ok := mcp.GetReportedToolByName(deviceID, agentID, toolName)
 	if !ok {
 		_ = c.SendResponse(request.ID, 404, nil, fmt.Sprintf("工具不存在: %s", toolName))
 		return

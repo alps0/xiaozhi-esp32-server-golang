@@ -93,6 +93,27 @@ func GetWsEndpointMcpTools(agentId string) (map[string]tool.InvokableTool, error
 	return mcpClientPool.GetWsEndpointMcpTools(agentId)
 }
 
+// GetReportedToolsByDeviceIdAndAgentId 仅获取设备/智能体上报的MCP工具（不包含本地与全局MCP）
+func GetReportedToolsByDeviceIdAndAgentId(deviceId string, agentId string) (map[string]tool.InvokableTool, error) {
+	return mcpClientPool.GetAllToolsByDeviceIdAndAgentId(deviceId, agentId)
+}
+
+// GetReportedToolByName 仅在设备/智能体上报的MCP工具中查找并返回
+func GetReportedToolByName(deviceId string, agentId string, toolName string) (tool.InvokableTool, bool) {
+	reportedTools, err := GetReportedToolsByDeviceIdAndAgentId(deviceId, agentId)
+	if err != nil {
+		log.Errorf("获取上报MCP工具失败: device=%s agent=%s err=%v", deviceId, agentId, err)
+		return nil, false
+	}
+
+	invokable, ok := reportedTools[toolName]
+	if ok {
+		return invokable, true
+	}
+
+	return nil, false
+}
+
 func GetAudioResourceByTool(tool McpTool, resourceLink mcp_go.ResourceLink) (mcp_go.ReadResourceResult, error) {
 	/*client := tool.GetClient()
 	resourceRequest := mcp_go.ReadResourceRequest{

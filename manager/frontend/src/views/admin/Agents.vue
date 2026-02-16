@@ -182,7 +182,7 @@
         <el-divider />
         <el-form :model="mcpCallForm" label-width="90px">
           <el-form-item label="工具">
-            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width: 100%">
+            <el-select v-model="mcpCallForm.tool_name" placeholder="请选择工具" style="width: 100%" @change="handleMcpToolChange">
               <el-option v-for="tool in mcpTools" :key="tool.name" :label="tool.name" :value="tool.name" />
             </el-select>
           </el-form-item>
@@ -452,8 +452,11 @@ const refreshMcpTools = async () => {
     const response = await api.get(`/admin/agents/${currentAgentId.value}/mcp-tools`)
     if (response.data.data && response.data.data.tools) {
       mcpTools.value = response.data.data.tools
-      if (!mcpCallForm.value.tool_name && mcpTools.value.length > 0) {
-        mcpCallForm.value.tool_name = mcpTools.value[0].name
+      if (mcpTools.value.length > 0) {
+        if (!mcpCallForm.value.tool_name) {
+          mcpCallForm.value.tool_name = mcpTools.value[0].name
+        }
+        updateMcpExampleByTool(mcpCallForm.value.tool_name)
       }
       ElMessage.success(`成功获取 ${mcpTools.value.length} 个工具`)
     } else {
@@ -472,6 +475,42 @@ const refreshMcpTools = async () => {
 
 
 
+
+
+
+const buildExampleFromSchema = (schema = {}) => {
+  if (!schema || typeof schema !== 'object') return {}
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0]
+
+  const type = schema.type || 'object'
+  if (type === 'object') {
+    const props = schema.properties || {}
+    const result = {}
+    Object.keys(props).sort().forEach((key) => {
+      result[key] = buildExampleFromSchema(props[key])
+    })
+    return result
+  }
+  if (type === 'array') {
+    return [buildExampleFromSchema(schema.items || {})]
+  }
+  if (type === 'number') return 0.1
+  if (type === 'integer') return 0
+  if (type === 'boolean') return false
+  return ''
+}
+
+const updateMcpExampleByTool = (toolName) => {
+  const selectedTool = mcpTools.value.find(item => item.name === toolName)
+  if (!selectedTool) return
+
+  const example = selectedTool.example_arguments ?? buildExampleFromSchema(selectedTool.input_schema || {})
+  mcpCallForm.value.argumentsText = JSON.stringify(example ?? {}, null, 2)
+}
+
+const handleMcpToolChange = (toolName) => {
+  updateMcpExampleByTool(toolName)
+}
 
 const callAgentMcpTool = async () => {
   if (!currentAgentId.value || !mcpCallForm.value.tool_name) {

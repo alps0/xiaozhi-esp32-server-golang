@@ -2306,16 +2306,12 @@ func (ac *AdminController) GetDeviceMcpTools(c *gin.Context) {
 		return
 	}
 
-	toolNames, err := ac.WebSocketController.RequestDeviceMcpToolsFromClient(context.Background(), device.DeviceName)
+	tools, err := ac.WebSocketController.RequestDeviceMcpToolDetailsFromClient(context.Background(), device.DeviceName)
 	if err != nil {
 		c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": []interface{}{}}})
 		return
 	}
 
-	tools := make([]gin.H, 0, len(toolNames))
-	for _, toolName := range toolNames {
-		tools = append(tools, gin.H{"name": toolName, "description": fmt.Sprintf("MCP工具: %s", toolName), "schema": true})
-	}
 	c.JSON(http.StatusOK, gin.H{"data": gin.H{"tools": tools}})
 }
 
