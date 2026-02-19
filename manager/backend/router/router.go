@@ -142,6 +142,7 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				user.GET("/tts-configs", userController.GetTTSConfigs)
 
 				// MCP接入点
+				user.GET("/agents/:id/mcp-services/options", userController.GetAgentMCPServiceOptions)
 				user.GET("/agents/:id/mcp-endpoint", userController.GetAgentMCPEndpoint)
 				user.GET("/agents/:id/mcp-tools", userController.GetAgentMcpTools)
 				user.POST("/agents/:id/mcp-call", userController.CallAgentMcpTool)
@@ -248,6 +249,19 @@ func Setup(db *gorm.DB, cfg *config.Config) *gin.Engine {
 				admin.POST("/mcp-configs", adminController.CreateMCPConfig)
 				admin.PUT("/mcp-configs/:id", adminController.UpdateMCPConfig)
 				admin.DELETE("/mcp-configs/:id", adminController.DeleteMCPConfig)
+				admin.GET("/mcp-markets", adminController.GetMCPMarkets)
+				admin.POST("/mcp-markets", adminController.CreateMCPMarket)
+				admin.PUT("/mcp-markets/:id", adminController.UpdateMCPMarket)
+				admin.DELETE("/mcp-markets/:id", adminController.DeleteMCPMarket)
+				admin.POST("/mcp-markets/:id/test", adminController.TestMCPMarket)
+				admin.GET("/mcp-market/providers", adminController.GetMCPMarketProviders)
+				admin.GET("/mcp-market/services", adminController.GetMCPMarketServices)
+				admin.GET("/mcp-market/services/:market_id/*service_id", adminController.GetMCPMarketServiceDetail)
+				admin.POST("/mcp-market/import", adminController.ImportMCPMarketService)
+				admin.GET("/mcp-market/imported-services", adminController.GetMCPMarketImportedServices)
+				admin.POST("/mcp-market/imported-services", adminController.CreateMCPMarketImportedService)
+				admin.PUT("/mcp-market/imported-services/:id", adminController.UpdateMCPMarketImportedService)
+				admin.DELETE("/mcp-market/imported-services/:id", adminController.DeleteMCPMarketImportedService)
 
 				// Memory配置管理
 				admin.GET("/memory-configs", adminController.GetMemoryConfigs)

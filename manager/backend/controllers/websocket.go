@@ -724,7 +724,6 @@ func (ctrl *WebSocketController) broadcastRequestAndWaitFirstSuccess(ctx context
 			delete(client.callbacks, requestID)
 			client.mu.Unlock()
 		}
-		close(responseChan)
 	}()
 
 	responsesReceived := 0

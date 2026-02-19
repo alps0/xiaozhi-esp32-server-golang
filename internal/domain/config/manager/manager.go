@@ -80,9 +80,10 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 				Voice              *string  `json:"voice"`
 				VoiceModelOverride *string  `json:"voice_model_override"`
 			} `json:"voice_identify"`
-			Prompt     string `json:"prompt"`
-			AgentId    string `json:"agent_id"`
-			MemoryMode string `json:"memory_mode"`
+			Prompt          string `json:"prompt"`
+			AgentId         string `json:"agent_id"`
+			MemoryMode      string `json:"memory_mode"`
+			MCPServiceNames string `json:"mcp_service_names"`
 		} `json:"data"`
 	}
 
@@ -155,9 +156,10 @@ func (c *ConfigManager) GetUserConfig(ctx context.Context, deviceID string) (typ
 			Provider: response.Data.Memory.Provider,
 			Config:   parseJsonData(response.Data.Memory.JsonData),
 		},
-		VoiceIdentify: voiceIdentifyData,
-		MemoryMode:    response.Data.MemoryMode,
-		AgentId:       response.Data.AgentId,
+		VoiceIdentify:   voiceIdentifyData,
+		MemoryMode:      response.Data.MemoryMode,
+		AgentId:         response.Data.AgentId,
+		MCPServiceNames: strings.TrimSpace(response.Data.MCPServiceNames),
 	}
 	if strings.TrimSpace(config.MemoryMode) == "" {
 		config.MemoryMode = "short"
@@ -189,14 +191,14 @@ func (c *ConfigManager) GetSystemConfig(ctx context.Context) (string, error) {
 		if voiceIdentifyMap, ok := voiceIdentifyData.(map[string]interface{}); ok {
 			// 如果 voice_identify 配置存在但没有 threshold 字段，添加默认值
 			if _, hasThreshold := voiceIdentifyMap["threshold"]; !hasThreshold {
-				voiceIdentifyMap["threshold"] = 0.6
-				log.Log().Info("voice_identify 配置缺少 threshold 字段，已添加默认值 0.6")
+				voiceIdentifyMap["threshold"] = 0.4
+				log.Log().Info("voice_identify 配置缺少 threshold 字段，已添加默认值 0.4")
 			} else {
 				// 验证阈值范围
 				if thresholdVal, ok := voiceIdentifyMap["threshold"].(float64); ok {
 					if thresholdVal < 0 || thresholdVal > 1 {
-						log.Log().Warnf("voice_identify.threshold 值 %.4f 超出有效范围 [0.0, 1.0]，使用默认值 0.6", thresholdVal)
-						voiceIdentifyMap["threshold"] = 0.6
+						log.Log().Warnf("voice_identify.threshold 值 %.4f 超出有效范围 [0.0, 1.0]，使用默认值 0.4", thresholdVal)
+						voiceIdentifyMap["threshold"] = 0.4
 					}
 				}
 			}
